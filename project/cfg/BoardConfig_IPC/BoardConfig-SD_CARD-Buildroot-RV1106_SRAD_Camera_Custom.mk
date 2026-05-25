@@ -7,6 +7,9 @@ export LF_ORIGIN_BOARD_CONFIG=BoardConfig-SD_CARD-Buildroot-RV1106_SRAD_Camera_C
 # Target CHIP
 export RK_CHIP=rv1106
 
+# Parallel build jobs
+export RK_JOBS=16
+
 # app config
 export RK_APP_TYPE=RKIPC_RV1106 # TODO: confirm
 
