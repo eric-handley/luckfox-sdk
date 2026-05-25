@@ -1,0 +1,1 @@
+../project/cfg/BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1106_SRAD_Camera_Custom.mk
