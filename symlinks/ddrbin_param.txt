@@ -1,0 +1,13 @@
+start tag=0x12345678
+
+uart id=2
+uart iomux=1
+uart baudrate=115200
+
+tpl_log_en=1
+spl_log_en=1
+optee_log_en=1
+atf_log_en=1
+uboot_log_en=1
+
+end

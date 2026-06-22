@@ -11,7 +11,7 @@ export RK_CHIP=rv1106
 export RK_JOBS=16
 
 # app config
-export RK_APP_TYPE=RKIPC_RV1106 # TODO: confirm
+export RK_APP_TYPE=RKIPC_RV1106
 
 # Config CMA size in environment
 export RK_BOOTARGS_CMA_SIZE="100M"
@@ -26,8 +26,8 @@ export RK_KERNEL_DTS=rv1106g-uvr-srad-camera.dts
 # Target boot medium
 export RK_BOOT_MEDIUM=sd_card
 
-# Uboot defconfig fragment
-export RK_UBOOT_DEFCONFIG_FRAGMENT="rk-emmc.config" # TODO: confirm
+# Uboot defconfig fragment (used for both EMMC and SD card boot)
+export RK_UBOOT_DEFCONFIG_FRAGMENT="rk-emmc.config"
 
 # specify post.sh for delete/overlay files
 # export RK_PRE_BUILD_OEM_SCRIPT=rv1103-spi_nor-post.sh
@@ -86,8 +86,8 @@ export RK_UBOOT_DEFCONFIG=uvr_srad_camera_uboot_defconfig
 # Kernel defconfig
 export RK_KERNEL_DEFCONFIG=uvr_srad_camera_linux_defconfig
 
-# Kernel defconfig fragment
-# export RK_KERNEL_DEFCONFIG_FRAGMENT=rv1106-bt.config # TODO: confirm not needed (bluetooth?)
+# Kernel defconfig fragment (Bluetooth not needed for this board)
+# export RK_KERNEL_DEFCONFIG_FRAGMENT=rv1106-bt.config
 
 # Config sensor IQ files
 # RK_CAMERA_SENSOR_IQFILES format:
