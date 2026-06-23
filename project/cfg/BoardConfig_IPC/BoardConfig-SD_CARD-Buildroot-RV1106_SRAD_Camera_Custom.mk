@@ -93,7 +93,10 @@ export RK_KERNEL_DEFCONFIG=uvr_srad_camera_linux_defconfig
 # RK_CAMERA_SENSOR_IQFILES format:
 #     "iqfile1 iqfile2 iqfile3 ..."
 # ./build.sh media and copy <SDK root dir>/output/out/media_out/isp_iqfiles/$RK_CAMERA_SENSOR_IQFILES
-export RK_CAMERA_SENSOR_IQFILES="imx415_CMK-OT2022-PX1_IR0147-36IRC-8M-F20.json"
+# Placeholder: imx519 IQ is a copy of the imx415 tuning (same ISP V32). rkaiq
+# resolves <sensor>_<module-name>_<lens-name>.json from DT (arducam-imx519 /
+# default). Color/shading will be mistuned until a real IMX519 IQ exists (step 6).
+export RK_CAMERA_SENSOR_IQFILES="imx519_arducam-imx519_default.json"
 
 # Config sensor lens CAC calibrattion bin files
 #export RK_CAMERA_SENSOR_CAC_BIN="CAC_sc4336_OT01_40IRC_F16"
