@@ -251,8 +251,12 @@ static void dw_mci_wait_while_busy(struct dw_mci *host, u32 cmd_flags)
 		if (readl_poll_timeout_atomic(host->regs + SDMMC_STATUS,
 					      status,
 					      !(status & SDMMC_STATUS_BUSY),
-					      delay, 500 * USEC_PER_MSEC))
-			dev_err(host->dev, "Busy; trying anyway\n");
+					      delay, 500 * USEC_PER_MSEC)) {
+			if (host->is_rv1106_sd)
+				dev_dbg(host->dev, "Busy; trying anyway\n");
+			else
+				dev_err(host->dev, "Busy; trying anyway\n");
+		}
 	}
 }
 
@@ -1450,8 +1454,35 @@ static void dw_mci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	spin_lock_bh(&host->lock);
 
-	if (host->is_rv1106_sd)
-		dw_mci_reset(host);
+	if (host->is_rv1106_sd) {
+		/*
+		 * RV1106 SD errata: full controller reset before every request.
+		 *
+		 * We do the reset inline instead of calling dw_mci_reset()
+		 * because that function's UPD_CLK uses a 500ms timeout via
+		 * mci_send_cmd(). On this silicon, UPD_CLK intermittently
+		 * hangs after CIU reset — the controller still functions
+		 * fine afterward, but the 500ms busy-wait stalls boot and
+		 * I/O. We use a 1ms timeout instead: if UPD_CLK doesn't
+		 * complete immediately, it won't complete at all, and the
+		 * next real command will work regardless.
+		 */
+		u32 cmd_status;
+
+		dw_mci_ctrl_reset(host, SDMMC_CTRL_RESET |
+				  SDMMC_CTRL_FIFO_RESET | SDMMC_CTRL_DMA_RESET);
+		mci_writel(host, RINTSTS, 0xFFFFFFFF);
+		if (host->use_dma == TRANS_MODE_IDMAC)
+			dw_mci_idmac_init(host);
+
+		/* Short-timeout UPD_CLK to re-sync CIU clock state */
+		mci_writel(host, CMDARG, 0);
+		wmb();
+		mci_writel(host, CMD, SDMMC_CMD_START | SDMMC_CMD_UPD_CLK);
+		readl_poll_timeout_atomic(host->regs + SDMMC_CMD, cmd_status,
+					  !(cmd_status & SDMMC_CMD_START),
+					  1, 1000);
+	}
 
 	dw_mci_queue_request(host, slot, mrq);
 
@@ -1839,7 +1870,7 @@ static bool dw_mci_reset(struct dw_mci *host)
 
 ciu_out:
 	/* After a CTRL reset we need to have CIU set clock registers  */
-	mci_send_cmd(host->slot, SDMMC_CMD_UPD_CLK | SDMMC_CMD_PRV_DAT_WAIT, 0);
+	mci_send_cmd(host->slot, SDMMC_CMD_UPD_CLK, 0);
 
 	return ret;
 }
