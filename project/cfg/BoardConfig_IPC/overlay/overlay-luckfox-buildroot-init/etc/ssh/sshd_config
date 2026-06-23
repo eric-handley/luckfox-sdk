@@ -1,0 +1,6 @@
+#	$OpenBSD: sshd_config,v 1.104 2021/07/02 05:11:21 dtucker Exp $
+
+PermitRootLogin yes
+AuthorizedKeysFile	.ssh/authorized_keys
+PermitEmptyPasswords yes
+Subsystem	sftp	/usr/libexec/sftp-server

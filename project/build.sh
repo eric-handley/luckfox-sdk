@@ -2485,16 +2485,24 @@ function __RUN_POST_BUILD_SCRIPT() {
 }
 
 function post_overlay() {
+	echo "[post_overlay] RK_POST_OVERLAY='$RK_POST_OVERLAY'"
 	[ -n "$RK_POST_OVERLAY" ] || return 0
 
 	local tmp_path
 	tmp_path=$(realpath $BOARD_CONFIG)
 	tmp_path=$(dirname $tmp_path)
 
+	echo "[post_overlay] tmp_path=$tmp_path"
+	echo "[post_overlay] target=$RK_PROJECT_PACKAGE_ROOTFS_DIR"
+
 	for overlay_dir in $RK_POST_OVERLAY; do
+		echo "[post_overlay] checking $tmp_path/overlay/$overlay_dir"
 		if [ -d "$tmp_path/overlay/$overlay_dir" ]; then
-			rsync -a --ignore-times --keep-dirlinks --chmod=u=rwX,go=rX --exclude .empty \
+			echo "[post_overlay] applying $overlay_dir"
+			rsync -av --ignore-times --keep-dirlinks --chmod=u=rwX,go=rX --exclude .empty \
 				$tmp_path/overlay/$overlay_dir/* $RK_PROJECT_PACKAGE_ROOTFS_DIR/
+		else
+			echo "[post_overlay] NOT FOUND: $tmp_path/overlay/$overlay_dir"
 		fi
 	done
 }
