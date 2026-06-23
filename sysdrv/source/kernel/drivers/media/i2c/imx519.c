@@ -30,68 +30,68 @@
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mediabus.h>
 
-#define DRIVER_VERSION            KERNEL_VERSION(0, 0x01, 0x00)
+#define DRIVER_VERSION                      KERNEL_VERSION(0, 0x01, 0x00)
 
 #ifndef V4L2_CID_DIGITAL_GAIN
-#define V4L2_CID_DIGITAL_GAIN        V4L2_CID_GAIN
+#define V4L2_CID_DIGITAL_GAIN               V4L2_CID_GAIN
 #endif
 
-#define IMX519_LINK_FREQ_493M        493500000
+#define IMX519_LINK_FREQ_493M               493500000
 
-#define IMX519_2LANES            2
+#define IMX519_2LANES                       2
 
-#define IMX519_XVCLK_FREQ_24M        24000000
+#define IMX519_XVCLK_FREQ_24M               24000000
 
 /* Chip ID (16-bit at 0x0016) */
-#define IMX519_REG_CHIP_ID        0x0016
-#define IMX519_CHIP_ID            0x0519
+#define IMX519_REG_CHIP_ID                  0x0016
+#define IMX519_CHIP_ID                      0x0519
 
-#define IMX519_REG_CTRL_MODE        0x0100
-#define IMX519_MODE_SW_STANDBY        0x00
-#define IMX519_MODE_STREAMING        0x01
+#define IMX519_REG_CTRL_MODE                0x0100
+#define IMX519_MODE_SW_STANDBY              0x00
+#define IMX519_MODE_STREAMING               0x01
 
-#define IMX519_REG_EXPOSURE        0x0202
-#define IMX519_EXPOSURE_OFFSET        32
-#define IMX519_EXPOSURE_MIN        20
-#define IMX519_EXPOSURE_STEP        1
-#define IMX519_EXPOSURE_DEFAULT        0x3e8
+#define IMX519_REG_EXPOSURE                 0x0202
+#define IMX519_EXPOSURE_OFFSET              32
+#define IMX519_EXPOSURE_MIN                 20
+#define IMX519_EXPOSURE_STEP                1
+#define IMX519_EXPOSURE_DEFAULT             0x3e8
 
-#define IMX519_REG_ANALOG_GAIN        0x0204
-#define IMX519_ANA_GAIN_MIN        0
-#define IMX519_ANA_GAIN_MAX        960
-#define IMX519_ANA_GAIN_STEP        1
-#define IMX519_ANA_GAIN_DEFAULT        0
+#define IMX519_REG_ANALOG_GAIN              0x0204
+#define IMX519_ANA_GAIN_MIN                 0
+#define IMX519_ANA_GAIN_MAX                 960
+#define IMX519_ANA_GAIN_STEP                1
+#define IMX519_ANA_GAIN_DEFAULT             0
 
-#define IMX519_REG_DIGITAL_GAIN        0x020e
-#define IMX519_DGTL_GAIN_MIN        0x0100
-#define IMX519_DGTL_GAIN_MAX        0xffff
-#define IMX519_DGTL_GAIN_STEP        1
-#define IMX519_DGTL_GAIN_DEFAULT    0x0100
+#define IMX519_REG_DIGITAL_GAIN             0x020e
+#define IMX519_DGTL_GAIN_MIN                0x0100
+#define IMX519_DGTL_GAIN_MAX                0xffff
+#define IMX519_DGTL_GAIN_STEP               1
+#define IMX519_DGTL_GAIN_DEFAULT            0x0100
 
-#define IMX519_REG_VTS            0x0340
-#define IMX519_VTS_MAX            0xffdc
+#define IMX519_REG_VTS                      0x0340
+#define IMX519_VTS_MAX                      0xffdc
 
-#define IMX519_REG_ORIENTATION        0x0101
-#define IMX519_MIRROR_BIT_MASK        BIT(0)
-#define IMX519_FLIP_BIT_MASK        BIT(1)
+#define IMX519_REG_ORIENTATION              0x0101
+#define IMX519_MIRROR_BIT_MASK              BIT(0)
+#define IMX519_FLIP_BIT_MASK                BIT(1)
 
-#define IMX519_REG_TEST_PATTERN        0x0600
-#define IMX519_TEST_PATTERN_DISABLE    0
-#define IMX519_TEST_PATTERN_SOLID_COLOR    1
-#define IMX519_TEST_PATTERN_COLOR_BARS    2
-#define IMX519_TEST_PATTERN_GREY_COLOR    3
-#define IMX519_TEST_PATTERN_PN9        4
+#define IMX519_REG_TEST_PATTERN             0x0600
+#define IMX519_TEST_PATTERN_DISABLE         0
+#define IMX519_TEST_PATTERN_SOLID_COLOR     1
+#define IMX519_TEST_PATTERN_COLOR_BARS      2
+#define IMX519_TEST_PATTERN_GREY_COLOR      3
+#define IMX519_TEST_PATTERN_PN9             4
 
-#define REG_NULL            0xFFFF
-#define REG_DELAY            0xFFFE
+#define REG_NULL                            0xFFFF
+#define REG_DELAY                           0xFFFE
 
-#define IMX519_REG_VALUE_08BIT        1
-#define IMX519_REG_VALUE_16BIT        2
+#define IMX519_REG_VALUE_08BIT              1
+#define IMX519_REG_VALUE_16BIT              2
 
 #define OF_CAMERA_PINCTRL_STATE_DEFAULT    "rockchip,camera_default"
-#define OF_CAMERA_PINCTRL_STATE_SLEEP    "rockchip,camera_sleep"
+#define OF_CAMERA_PINCTRL_STATE_SLEEP      "rockchip,camera_sleep"
 
-#define IMX519_NAME            "imx519"
+#define IMX519_NAME                        "imx519"
 
 struct regval {
     u16 addr;

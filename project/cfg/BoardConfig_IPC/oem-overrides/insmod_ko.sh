@@ -35,12 +35,12 @@ __insmod imx519.ko
 # __insmod mis5001.ko
 # __insmod mia1321.ko
 
-# --- ISP/CIF pipeline (disabled, re-enable when camera is integrated) ---
-# __insmod video_rkcif.ko
+# --- CSI receiver pipeline (step 2a: D-PHY + CIF; ISP still disabled) ---
+__insmod phy-rockchip-csi2-dphy-hw.ko
+__insmod phy-rockchip-csi2-dphy.ko
+__insmod video_rkcif.ko
+echo 1 > /sys/module/video_rkcif/parameters/clr_unready_dev
 # __insmod video_rkisp.ko
-# __insmod phy-rockchip-csi2-dphy-hw.ko
-# __insmod phy-rockchip-csi2-dphy.ko
-# echo 1 > /sys/module/video_rkcif/parameters/clr_unready_dev
 # echo 1 > /sys/module/video_rkisp/parameters/clr_unready_dev
 
 # --- Hardware acceleration ---

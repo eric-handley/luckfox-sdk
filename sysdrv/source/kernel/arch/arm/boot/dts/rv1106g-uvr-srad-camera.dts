@@ -116,17 +116,24 @@
     status = "okay";
 };
 
-/**********CSI/ISP (disabled for now)**********/
+/**********CSI receiver (step 2a: D-PHY + MIPI + CIF; ISP still disabled)**********/
 // &cam_ircut0 {
 //     status = "disabled";
 // };
 
 &csi2_dphy_hw {
-    status = "disabled";
+    status = "okay";
 };
 
 &csi2_dphy0 {
-    status = "disabled";
+    status = "okay";
+};
+
+/* Repurpose the inherited imx415 dphy input (port@0/endpoint@1) for the
+ * imx519 on i2c3, at 2 lanes. The inherited i2c4 sensors stay disabled. */
+&csi_dphy_input1 {
+    remote-endpoint = <&imx519_out>;
+    data-lanes = <1 2>;
 };
 
 &i2c3 {
@@ -146,9 +153,9 @@
         rockchip,camera-module-lens-name = "default";
         port {
             imx519_out: endpoint {
+                remote-endpoint = <&csi_dphy_input1>;
                 data-lanes = <1 2>;
                 link-frequencies = /bits/ 64 <493500000>;
-                /* remote-endpoint wired when CSI is enabled (step 2) */
             };
         };
     };
@@ -159,17 +166,18 @@
 };
 
 &mipi0_csi2 {
-    status = "disabled";
+    status = "okay";
 };
 
 &rkcif {
-    status = "disabled";
+    status = "okay";
 };
 
 &rkcif_mipi_lvds {
-    status = "disabled";
+    status = "okay";
 };
 
+/* sditf is the direct-to-ISP path; stays disabled until step 3 */
 &rkcif_mipi_lvds_sditf {
     status = "disabled";
 };
