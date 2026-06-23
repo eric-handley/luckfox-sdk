@@ -58,7 +58,8 @@ post_chk() {
         cd $default_ko_dir && sh insmod_ko.sh && cd -
     fi
 
-    network_init &
+    # network_init disabled — no ethernet on this board
+    # network_init &
 
     # --- rkipc camera daemon (disabled, re-enable when camera is integrated) ---
     # check_linker /userdata /oem/usr/www/userdata

@@ -1,0 +1,3 @@
+#!/bin/sh
+# network disabled — no ethernet on this board
+exit 0

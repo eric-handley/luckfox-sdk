@@ -1,0 +1,3 @@
+#!/bin/sh
+# telnetd disabled — using SSH instead
+exit 0

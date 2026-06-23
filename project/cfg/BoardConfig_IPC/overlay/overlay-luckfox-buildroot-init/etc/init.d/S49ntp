@@ -1,0 +1,3 @@
+#!/bin/sh
+# ntpd disabled — no network time source available
+exit 0

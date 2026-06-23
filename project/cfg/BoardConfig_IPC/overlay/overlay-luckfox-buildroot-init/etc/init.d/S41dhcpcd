@@ -1,0 +1,3 @@
+#!/bin/sh
+# dhcpcd disabled — no network on this board
+exit 0
