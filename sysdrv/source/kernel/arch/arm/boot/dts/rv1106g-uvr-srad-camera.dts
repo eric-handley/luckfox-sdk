@@ -177,17 +177,18 @@
     status = "okay";
 };
 
-/* sditf is the direct-to-ISP path; stays disabled until step 3 */
+/* sditf is the direct-to-ISP path (step 3: CIF -> ISP). Endpoint wiring
+ * (mipi_lvds_sditf <-> isp_in) is inherited from the base dtsi. */
 &rkcif_mipi_lvds_sditf {
-    status = "disabled";
+    status = "okay";
 };
 
 &rkisp {
-    status = "disabled";
+    status = "okay";
 };
 
 &rkisp_vir0 {
-    status = "disabled";
+    status = "okay";
 };
 
 /**********SPI**********/
