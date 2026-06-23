@@ -43,7 +43,26 @@ function remove_data()
     lf_rm $RK_PROJECT_PACKAGE_OEM_DIR/usr/share/vqefiles/*
 }
 
+# Replace boot scripts with custom versions (camera modules commented out but preserved)
+function install_overrides()
+{
+    local override_dir
+    override_dir=$(dirname $(realpath $0))/oem-overrides
+
+    if [ -d "$override_dir" ]; then
+        for f in "$override_dir"/*; do
+            fname=$(basename "$f")
+            # Find and replace matching files in oem
+            find $RK_PROJECT_PACKAGE_OEM_DIR -name "$fname" -type f | while read target; do
+                echo "Overriding: $target"
+                cp "$f" "$target"
+            done
+        done
+    fi
+}
+
 #=========================
 # run
 #=========================
 remove_data
+install_overrides
