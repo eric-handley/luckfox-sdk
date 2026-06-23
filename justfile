@@ -16,6 +16,22 @@ build:
     rm -rf output/out/rootfs_uclibc_rv1106 sysdrv/out/rootfs_uclibc_rv1106 sysdrv/out/rootfs_uclibc_rv1106.tar
     docker run --rm -v "$(pwd):/workspace" --tmpfs /tmp:exec -u $(id -u):$(id -g) luckfox-sdk-builder ./build.sh | tee logs/docker-build-$(date +%Y-%m-%d_%H:%M:%S).log
 
+# Build the uvr-vicap capture binary in the container and copy it to the board
+vicap board="172.32.0.1" dest="/data":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just docker-run "make -C media/samples/simple_test uvr-vicap RK_MEDIA_CROSS=arm-rockchip830-linux-uclibcgnueabihf RK_CHIP=rv1106"
+    bin=media/samples/simple_test/uvr-vicap
+    want=$(md5sum "$bin" | cut -d' ' -f1)
+    scp "$bin" root@{{board}}:{{dest}}/uvr-vicap
+    # flush to the SD card, then verify the on-disk copy matches the host build
+    got=$(ssh root@{{board}} "sync && md5sum {{dest}}/uvr-vicap" | cut -d' ' -f1)
+    if [ "$want" != "$got" ]; then
+        echo "ERROR: checksum mismatch (host $want != board $got) - transfer corrupt" >&2
+        exit 1
+    fi
+    echo "uvr-vicap copied and verified ($want) at {{dest}}/uvr-vicap"
+
 flash device="/dev/mmcblk0":
     #!/usr/bin/env bash
     set -euo pipefail

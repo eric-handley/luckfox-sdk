@@ -136,6 +136,9 @@ simple_vi_bind_venc_svc_rtsp: simple_vi_bind_venc_svc_rtsp.c
 simple_vi_bind_venc_wrap_rv1106: simple_vi_bind_venc_wrap_rv1106.c
 	@$(SIMPLE_CC) $^ -o $@ $(SIMPLE_CFLAGS) $(SIMPLE_LD_FLAGS)
 
+uvr-vicap: uvr-vicap.c
+	@$(SIMPLE_CC) $^ -o $@ $(SIMPLE_CFLAGS) $(SIMPLE_LD_FLAGS) -lrkaiq
+
 simple_vi_bind_vpss_bind_venc: simple_vi_bind_vpss_bind_venc.c
 	@$(SIMPLE_CC) $^ -o $@ $(SIMPLE_CFLAGS) $(SIMPLE_LD_FLAGS)
 

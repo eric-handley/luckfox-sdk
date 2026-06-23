@@ -1,0 +1,313 @@
+// UVR SRAD Camera capture - RV1106G2 + Arducam IMX519 (2-lane MIPI)
+//
+// Self-contained capture: runs the rkaiq 3A engine in-process (no separate
+// rkaiq_3A_server needed) and streams VI -> VENC over the RV1106 wrap/online
+// (DVBM) path, writing a raw HEVC elementary stream to a file.
+//
+// Distilled from the Rockchip simple_test samples
+// (simple_vi_bind_venc_wrap_rv1106.c + simple_vi_bind_venc_rtsp.c) with every
+// path we do not use removed (RTSP, OSD/RGN, IVS/IVA, TDE, JPEG, debreath,
+// codec/format switching). Dedicated to our fixed 1080p H.265 pipeline.
+
+#include <getopt.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <rk_aiq_user_api2_sysctl.h>
+
+#include "rk_debug.h"
+#include "rk_defines.h"
+#include "rk_mpi_mb.h"
+#include "rk_mpi_sys.h"
+#include "rk_mpi_venc.h"
+#include "rk_mpi_vi.h"
+
+// ---- our fixed setup ------------------------------------------------------
+#define CAM_ID            0                 // rkisp main path
+#define VI_WIDTH          1920
+#define VI_HEIGHT         1080
+#define VI_BUF_COUNT      3
+#define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
+#define VENC_GOP          60
+#define VENC_BITRATE_KB   (10 * 1024)       // 10 Mbps CBR
+#define IQ_FILE_DIR       "/etc/iqfiles"
+#define DEFAULT_OUT_PATH  "/data/uvr_capture.h265"
+
+static volatile bool g_quit = false;
+static rk_aiq_sys_ctx_t *g_aiq_ctx = NULL;
+static rk_aiq_working_mode_t g_aiq_mode = RK_AIQ_WORKING_MODE_NORMAL;
+static VI_CHN_BUF_WRAP_S g_vi_wrap;
+
+static void sigterm_handler(int sig) {
+    fprintf(stderr, "\nsignal %d, stopping\n", sig);
+    g_quit = true;
+}
+
+static RK_U64 now_us(void) {
+    struct timespec t = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (RK_U64)t.tv_sec * 1000000 + (RK_U64)t.tv_nsec / 1000;
+}
+
+// ---- rkaiq 3A (in-process, mandatory for the online ISP to stream) --------
+static XCamReturn isp_sof_cb(rk_aiq_metas_t *meta) {
+    (void)meta;
+    return XCAM_RETURN_NO_ERROR;
+}
+
+static XCamReturn isp_err_cb(rk_aiq_err_msg_t *msg) {
+    if (msg->err_code == XCAM_RETURN_BYPASS)
+        g_quit = true;
+    return XCAM_RETURN_NO_ERROR;
+}
+
+static int isp_start(void) {
+    rk_aiq_static_info_t info;
+    char hdr[16];
+
+    setlinebuf(stdout);
+    snprintf(hdr, sizeof(hdr), "%d", (int)g_aiq_mode);
+    setenv("HDR_MODE", hdr, 1); // must be set before init
+
+    if (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info)) {
+        printf("ERROR: enumStaticMetas failed\n");
+        return -1;
+    }
+    printf("3A: cam %d sensor '%s' iq '%s'\n", CAM_ID,
+           info.sensor_info.sensor_name, IQ_FILE_DIR);
+
+    g_aiq_ctx = rk_aiq_uapi2_sysctl_init(info.sensor_info.sensor_name,
+                                         IQ_FILE_DIR, isp_err_cb, isp_sof_cb);
+    if (!g_aiq_ctx) {
+        printf("ERROR: rkaiq sysctl_init failed\n");
+        return -1;
+    }
+    if (rk_aiq_uapi2_sysctl_prepare(g_aiq_ctx, 0, 0, g_aiq_mode)) {
+        printf("ERROR: rkaiq prepare failed\n");
+        return -1;
+    }
+    if (rk_aiq_uapi2_sysctl_start(g_aiq_ctx)) {
+        printf("ERROR: rkaiq start failed\n");
+        return -1;
+    }
+    printf("3A: rkaiq running\n");
+    return 0;
+}
+
+static void isp_stop(void) {
+    if (!g_aiq_ctx)
+        return;
+    rk_aiq_uapi2_sysctl_stop(g_aiq_ctx, false);
+    rk_aiq_uapi2_sysctl_deinit(g_aiq_ctx);
+    g_aiq_ctx = NULL;
+}
+
+// ---- VI -------------------------------------------------------------------
+static int vi_dev_init(void) {
+    VI_DEV_ATTR_S stDevAttr;
+    VI_DEV_BIND_PIPE_S stBindPipe;
+    int ret;
+
+    memset(&stDevAttr, 0, sizeof(stDevAttr));
+    memset(&stBindPipe, 0, sizeof(stBindPipe));
+
+    if (RK_MPI_VI_GetDevAttr(0, &stDevAttr) == RK_ERR_VI_NOT_CONFIG) {
+        ret = RK_MPI_VI_SetDevAttr(0, &stDevAttr);
+        if (ret != RK_SUCCESS) {
+            printf("ERROR: VI SetDevAttr %x\n", ret);
+            return -1;
+        }
+    }
+    if (RK_MPI_VI_GetDevIsEnable(0) != RK_SUCCESS) {
+        ret = RK_MPI_VI_EnableDev(0);
+        if (ret != RK_SUCCESS) {
+            printf("ERROR: VI EnableDev %x\n", ret);
+            return -1;
+        }
+        stBindPipe.u32Num = 1;
+        stBindPipe.PipeId[0] = 0;
+        ret = RK_MPI_VI_SetDevBindPipe(0, &stBindPipe);
+        if (ret != RK_SUCCESS) {
+            printf("ERROR: VI SetDevBindPipe %x\n", ret);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int vi_chn_init(void) {
+    VI_CHN_ATTR_S attr;
+    int ret;
+
+    memset(&attr, 0, sizeof(attr));
+    attr.stIspOpt.u32BufCount = VI_BUF_COUNT;
+    attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+    attr.stSize.u32Width = VI_WIDTH;
+    attr.stSize.u32Height = VI_HEIGHT;
+    attr.enPixelFormat = RK_FMT_YUV420SP;
+    attr.stIspOpt.stMaxSize.u32Width = VI_WIDTH;
+    attr.stIspOpt.stMaxSize.u32Height = VI_HEIGHT;
+    // depth must be >=1 (and < u32BufCount) when binding to VENC, otherwise
+    // GetStream blocks forever; framerate -1 = inherit sensor cadence.
+    attr.u32Depth = 1;
+    attr.stFrameRate.s32SrcFrameRate = -1;
+    attr.stFrameRate.s32DstFrameRate = -1;
+
+    ret = RK_MPI_VI_SetChnAttr(0, CAM_ID, &attr);
+    if (ret) {
+        printf("ERROR: VI SetChnAttr %d\n", ret);
+        return ret;
+    }
+
+    // wrap mode = RV1106 ISP->VENC online (DVBM) path
+    memset(&g_vi_wrap, 0, sizeof(g_vi_wrap));
+    g_vi_wrap.bEnable = RK_TRUE;
+    g_vi_wrap.u32BufLine = WRAP_LINE;
+    g_vi_wrap.u32WrapBufferSize = WRAP_LINE * VI_WIDTH * 3 / 2; // nv12
+    RK_MPI_VI_SetChnWrapBufAttr(0, CAM_ID, &g_vi_wrap);
+
+    ret = RK_MPI_VI_EnableChn(0, CAM_ID);
+    if (ret) {
+        printf("ERROR: VI EnableChn %d\n", ret);
+        return ret;
+    }
+    return 0;
+}
+
+// ---- VENC -----------------------------------------------------------------
+static int venc_init(void) {
+    VENC_CHN_ATTR_S attr;
+    VENC_CHN_BUF_WRAP_S wrap;
+    VENC_RECV_PIC_PARAM_S recv;
+
+    memset(&attr, 0, sizeof(attr));
+    attr.stVencAttr.enType = RK_VIDEO_ID_HEVC;
+    attr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
+    attr.stVencAttr.u32MaxPicWidth = VI_WIDTH;
+    attr.stVencAttr.u32MaxPicHeight = VI_HEIGHT;
+    attr.stVencAttr.u32PicWidth = VI_WIDTH;
+    attr.stVencAttr.u32PicHeight = VI_HEIGHT;
+    attr.stVencAttr.u32VirWidth = VI_WIDTH;
+    attr.stVencAttr.u32VirHeight = VI_HEIGHT;
+    attr.stVencAttr.u32StreamBufCnt = 5;
+    attr.stVencAttr.u32BufSize = VI_WIDTH * VI_HEIGHT * 3 / 2;
+    attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
+    attr.stRcAttr.stH265Cbr.u32BitRate = VENC_BITRATE_KB;
+    attr.stRcAttr.stH265Cbr.u32Gop = VENC_GOP;
+    attr.stGopAttr.u32MaxLtrCount = 1;
+
+    if (RK_MPI_VENC_CreateChn(0, &attr) != RK_SUCCESS) {
+        printf("ERROR: VENC CreateChn failed\n");
+        return -1;
+    }
+
+    memset(&wrap, 0, sizeof(wrap));
+    wrap.bEnable = g_vi_wrap.bEnable;
+    RK_MPI_VENC_SetChnBufWrapAttr(0, &wrap);
+
+    memset(&recv, 0, sizeof(recv));
+    recv.s32RecvPicNum = -1; // unlimited; loop count gates stop instead
+    RK_MPI_VENC_StartRecvFrame(0, &recv);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    const char *out_path = DEFAULT_OUT_PATH;
+    RK_S32 frame_cnt = -1; // -1 = until SIGINT
+    int ret = -1;
+    int c;
+
+    while ((c = getopt(argc, argv, "l:o:h")) != -1) {
+        switch (c) {
+        case 'l':
+            frame_cnt = atoi(optarg);
+            break;
+        case 'o':
+            out_path = optarg;
+            break;
+        case 'h':
+        default:
+            printf("usage: %s [-l frames] [-o out.h265]\n", argv[0]);
+            printf("  -l  number of frames to capture (default: until Ctrl-C)\n");
+            printf("  -o  output raw HEVC path (default: %s)\n", DEFAULT_OUT_PATH);
+            return c == 'h' ? 0 : -1;
+        }
+    }
+
+    printf("UVR capture: %dx%d H.265, frames=%d, out=%s\n", VI_WIDTH, VI_HEIGHT,
+           frame_cnt, out_path);
+
+    signal(SIGINT, sigterm_handler);
+    signal(SIGTERM, sigterm_handler);
+
+    FILE *fp = fopen(out_path, "wb");
+    if (!fp) {
+        printf("ERROR: cannot open %s\n", out_path);
+        return -1;
+    }
+
+    if (isp_start() != 0)
+        goto cleanup_file;
+
+    if (RK_MPI_SYS_Init() != RK_SUCCESS) {
+        printf("ERROR: RK_MPI_SYS_Init failed\n");
+        goto cleanup_isp;
+    }
+
+    if (vi_dev_init() != 0 || vi_chn_init() != 0)
+        goto cleanup_sys;
+    if (venc_init() != 0)
+        goto cleanup_vi;
+
+    MPP_CHN_S src = {.enModId = RK_ID_VI, .s32DevId = 0, .s32ChnId = CAM_ID};
+    MPP_CHN_S dst = {.enModId = RK_ID_VENC, .s32DevId = 0, .s32ChnId = 0};
+    if (RK_MPI_SYS_Bind(&src, &dst) != RK_SUCCESS) {
+        printf("ERROR: bind VI->VENC failed\n");
+        goto cleanup_venc;
+    }
+
+    VENC_STREAM_S frame;
+    frame.pstPack = malloc(sizeof(VENC_PACK_S));
+
+    RK_S32 count = 0;
+    while (!g_quit) {
+        if (RK_MPI_VENC_GetStream(0, &frame, -1) == RK_SUCCESS) {
+            void *data = RK_MPI_MB_Handle2VirAddr(frame.pstPack->pMbBlk);
+            fwrite(data, 1, frame.pstPack->u32Len, fp);
+
+            printf("frame %d seq:%d len:%u pts=%lld delay=%lldus\n", count,
+                   frame.u32Seq, frame.pstPack->u32Len, frame.pstPack->u64PTS,
+                   now_us() - frame.pstPack->u64PTS);
+
+            RK_MPI_VENC_ReleaseStream(0, &frame);
+            count++;
+            if (frame_cnt >= 0 && count >= frame_cnt)
+                break;
+        }
+    }
+    fflush(fp);
+    free(frame.pstPack);
+    ret = 0;
+
+    RK_MPI_SYS_UnBind(&src, &dst);
+cleanup_venc:
+    RK_MPI_VENC_StopRecvFrame(0);
+    RK_MPI_VENC_DestroyChn(0);
+cleanup_vi:
+    RK_MPI_VI_DisableChn(0, CAM_ID);
+    RK_MPI_VI_DisableDev(0);
+cleanup_sys:
+    RK_MPI_SYS_Exit();
+cleanup_isp:
+    isp_stop();
+cleanup_file:
+    fclose(fp);
+    printf("UVR capture exit: %d (%s)\n", ret, out_path);
+    return ret;
+}
