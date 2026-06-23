@@ -32,6 +32,13 @@
         pinctrl-names = "default";
         pinctrl-0 = <&cam_pwr_en>;
     };
+
+    out_osc_imx519: out-osc-imx519 {
+        compatible = "fixed-clock";
+        clock-output-names = "out-osc-imx519";
+        clock-frequency = <24000000>;
+        #clock-cells = <0>;
+    };
 };
 
 /**********CRU**********/
@@ -126,6 +133,25 @@
     status = "okay";
     pinctrl-names = "default";
     pinctrl-0 = <&i2c3m0_xfer>;
+
+    imx519: imx519@1a {
+        compatible = "sony,imx519";
+        status = "okay";
+        reg = <0x1a>;
+        clocks = <&out_osc_imx519>;
+        clock-names = "xvclk";
+        rockchip,camera-module-index = <0>;
+        rockchip,camera-module-facing = "back";
+        rockchip,camera-module-name = "arducam-imx519";
+        rockchip,camera-module-lens-name = "default";
+        port {
+            imx519_out: endpoint {
+                data-lanes = <1 2>;
+                link-frequencies = /bits/ 64 <493500000>;
+                /* remote-endpoint wired when CSI is enabled (step 2) */
+            };
+        };
+    };
 };
 
 &i2c4 {

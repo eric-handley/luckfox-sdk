@@ -12,6 +12,9 @@ __insmod()
     fi
 }
 
+# --- Camera sensor (step 1: probe only, ISP/CIF pipeline still disabled) ---
+__insmod imx519.ko
+
 # --- Camera sensor modules (disabled, re-enable when camera is integrated) ---
 # __insmod rk_dvbm.ko
 # __insmod videobuf2-memops.ko
