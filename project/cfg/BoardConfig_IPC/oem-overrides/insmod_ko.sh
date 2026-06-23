@@ -12,16 +12,14 @@ __insmod()
     fi
 }
 
+# --- DVBM buffer manager (ISP <-> VENC online path; needed by mpp_vcodec) ---
+__insmod rk_dvbm.ko
+
 # --- Camera sensor (step 1: probe only, ISP/CIF pipeline still disabled) ---
 __insmod imx519.ko
 
 # --- Camera sensor modules (disabled, re-enable when camera is integrated) ---
-# __insmod rk_dvbm.ko
-# __insmod videobuf2-memops.ko
-# __insmod videobuf2-common.ko
-# __insmod videobuf2-v4l2.ko
-# __insmod videobuf2-vmalloc.ko
-# __insmod videobuf2-cma-sg.ko
+# videobuf2-* are built-in (CONFIG_VIDEOBUF2_*=y), no insmod needed
 # __insmod imx415.ko
 # __insmod os04a10.ko
 # __insmod sc4336.ko
@@ -45,8 +43,7 @@ echo 1 > /sys/module/video_rkisp/parameters/clr_unready_dev
 
 # --- Hardware acceleration ---
 __insmod rga3.ko
-# mpp_vcodec depends on rk_dvbm (disabled above) — re-enable both when camera is integrated
-# __insmod mpp_vcodec.ko
+__insmod mpp_vcodec.ko
 __insmod rknpu.ko
 
 # --- Audio ---
@@ -55,8 +52,8 @@ __insmod snd-soc-rv1106.ko
 # --- Motor (disabled, not needed) ---
 # __insmod motor.ko
 
-# --- Rockit media framework (disabled, depends on ISP/CIF) ---
-# __insmod rockit.ko mcu_fw_path="./hpmcu_wrap.bin" mcu_fw_addr=0xff6fe000 isp_max_h=$sensor_height
+# --- Rockit media framework (step 4: userspace capture + VENC) ---
+__insmod rockit.ko mcu_fw_path="./hpmcu_wrap.bin" mcu_fw_addr=0xff6fe000 isp_max_h=1080
 
 # --- RVE (disabled, not needed) ---
 # __insmod rve.ko

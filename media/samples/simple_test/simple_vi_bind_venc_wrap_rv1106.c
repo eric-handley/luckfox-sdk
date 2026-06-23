@@ -132,7 +132,9 @@ static int vi_chn_init(int channelId, int width, int height, int maxWidth,
 
 	g_vi_chn_attr.stIspOpt.stMaxSize.u32Width = RK_MAX(maxWidth, width);
 	g_vi_chn_attr.stIspOpt.stMaxSize.u32Height = RK_MAX(maxHeight, height);
-	g_vi_chn_attr.u32Depth = 0; //0, get fail, 1 - u32BufCount, can get, if bind to other device, must be < u32BufCount
+	g_vi_chn_attr.u32Depth = 1; //0, get fail, 1 - u32BufCount, can get, if bind to other device, must be < u32BufCount
+	g_vi_chn_attr.stFrameRate.s32SrcFrameRate = -1;
+	g_vi_chn_attr.stFrameRate.s32DstFrameRate = -1;
 
 	ret = RK_MPI_VI_SetChnAttr(0, channelId, &g_vi_chn_attr);
 	if (ret) {

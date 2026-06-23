@@ -13,8 +13,12 @@ export RK_JOBS=16
 # app config
 export RK_APP_TYPE=RKIPC_RV1106
 
-# Config CMA size in environment
-export RK_BOOTARGS_CMA_SIZE="100M"
+# Config CMA size in environment.
+# This board is RV1106G2 (1Gb DDR3L = 128MB total). The inherited Pico Zero
+# value of 100M is for a 256MB board and starves the 128MB kernel (~19MB left),
+# causing rkisp-vir0 probe to fail with -ENOMEM. 32M leaves Linux ~88MB while
+# giving the 1080p ISP+VENC pipeline headroom (RV1103 128MB camera boards use 24M).
+export RK_BOOTARGS_CMA_SIZE="32M"
 
 # Kernel dts
 export RK_KERNEL_DTS=rv1106g-uvr-srad-camera.dts

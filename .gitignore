@@ -12,6 +12,4 @@ sysdrv/tools/board/dosfstools/dosfstools-4.2/
 logs/
 *.log
 
-*.bin
-*.mp4
-*.png
+.captures/
