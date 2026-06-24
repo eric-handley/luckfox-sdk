@@ -38,6 +38,13 @@
 
 #define IMX519_LINK_FREQ_493M               493500000
 
+/* The sensor's internal pixel clock is fixed by the PLL registers and is
+ * independent of the number of MIPI lanes.  The MIPI serializer packs
+ * pixels into fewer lanes at a higher per-lane bit rate, but the pixel
+ * production rate stays the same.  This value matches the Arducam and
+ * Raspberry Pi reference drivers.  Do NOT derive it from link_freq. */
+#define IMX519_PIXEL_RATE                   426666667
+
 #define IMX519_2LANES                       2
 
 #define IMX519_XVCLK_FREQ_24M               24000000
@@ -675,8 +682,6 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
     struct imx519 *imx519 = to_imx519(sd);
     const struct imx519_mode *mode;
     s64 h_blank, vblank_def;
-    u64 pixel_rate = 0;
-    u8 lanes = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
 
     mutex_lock(&imx519->mutex);
 
@@ -703,9 +708,7 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
                      1, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->vblank, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
-        pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
-            mode->bpp * 2 * lanes;
-        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, pixel_rate);
+        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, IMX519_PIXEL_RATE);
     }
 
     mutex_unlock(&imx519->mutex);
@@ -1267,10 +1270,8 @@ static int imx519_initialize_controls(struct imx519 *imx519)
     const struct imx519_mode *mode;
     struct v4l2_ctrl_handler *handler;
     s64 exposure_max, vblank_def;
-    u64 pixel_rate;
     u32 h_blank;
     int ret;
-    u8 lanes = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
 
     handler = &imx519->ctrl_handler;
     mode = imx519->cur_mode;
@@ -1285,10 +1286,8 @@ static int imx519_initialize_controls(struct imx519 *imx519)
                 link_freq_items);
     v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
 
-    pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
-        mode->bpp * 2 * lanes;
     imx519->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
-        V4L2_CID_PIXEL_RATE, 0, pixel_rate, 1, pixel_rate);
+        V4L2_CID_PIXEL_RATE, 0, IMX519_PIXEL_RATE, 1, IMX519_PIXEL_RATE);
 
     h_blank = mode->hts_def - mode->width;
     imx519->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,

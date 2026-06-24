@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <rk_aiq_user_api2_sysctl.h>
+#include <rk_aiq_user_api2_ae.h>
 
 #include "rk_debug.h"
 #include "rk_defines.h"
@@ -39,10 +40,16 @@
 #define IQ_FILE_DIR       "/etc/iqfiles"
 #define DEFAULT_OUT_PATH  "/data/uvr_capture.h265"
 
+enum log_level { LOG_QUIET = 0, LOG_NORMAL = 1, LOG_VERBOSE = 2 };
+
 static volatile bool g_quit = false;
 static rk_aiq_sys_ctx_t *g_aiq_ctx = NULL;
 static rk_aiq_working_mode_t g_aiq_mode = RK_AIQ_WORKING_MODE_NORMAL;
 static VI_CHN_BUF_WRAP_S g_vi_wrap;
+static enum log_level g_log_level = LOG_NORMAL;
+static bool g_manual_ae = false;
+static float g_manual_time = 0.001f;  // 1ms default (well under 16.67ms for 60fps)
+static float g_manual_gain = 8.0f;    // moderate gain
 
 static void sigterm_handler(int sig) {
     fprintf(stderr, "\nsignal %d, stopping\n", sig);
@@ -97,6 +104,27 @@ static int isp_start(void) {
         return -1;
     }
     printf("3A: rkaiq running\n");
+
+    // Let the IQ file's AecFrameRateMode (isFpsFix:1, FpsValue:30) drive the
+    // cadence, exactly like rkaiq_3A_server does (no setExpSwAttr). The old
+    // in-process runtime fps override re-clamped output to 15fps even with a
+    // 30fps IQ, so it is disabled. Kept (commented) in case manual AE needs it:
+    //     expSwAttr.stAuto.stFrmRate.isFpsFix = true;
+    //     expSwAttr.stAuto.stFrmRate.FpsValue = 30;
+    if (g_manual_ae) {
+        Uapi_ExpSwAttrV2_t expSwAttr;
+        memset(&expSwAttr, 0, sizeof(expSwAttr));
+        rk_aiq_user_api2_ae_getExpSwAttr(g_aiq_ctx, &expSwAttr);
+        expSwAttr.AecOpType = RK_AIQ_OP_MODE_MANUAL;
+        expSwAttr.stManual.LinearAE.ManualTimeEn = true;
+        expSwAttr.stManual.LinearAE.ManualGainEn = true;
+        expSwAttr.stManual.LinearAE.TimeValue = g_manual_time;
+        expSwAttr.stManual.LinearAE.GainValue = g_manual_gain;
+        XCamReturn ae_ret = rk_aiq_user_api2_ae_setExpSwAttr(g_aiq_ctx, expSwAttr);
+        printf("3A: manual AE time=%.4f gain=%.1f (ret=%d)\n",
+               g_manual_time, g_manual_gain, ae_ret);
+    }
+
     return 0;
 }
 
@@ -165,12 +193,16 @@ static int vi_chn_init(void) {
         return ret;
     }
 
-    // wrap mode = RV1106 ISP->VENC online (DVBM) path
-    memset(&g_vi_wrap, 0, sizeof(g_vi_wrap));
-    g_vi_wrap.bEnable = RK_TRUE;
-    g_vi_wrap.u32BufLine = WRAP_LINE;
-    g_vi_wrap.u32WrapBufferSize = WRAP_LINE * VI_WIDTH * 3 / 2; // nv12
-    RK_MPI_VI_SetChnWrapBufAttr(0, CAM_ID, &g_vi_wrap);
+    // OFFLINE mode: wrap DISABLED. The RV1106 ISP->VENC wrap/online (DVBM)
+    // path halves a genuine 30fps ISP stream to 15fps (the encoder receives
+    // 30fps but emits every other frame) - reproduced in Rockchip's own
+    // simple_vi_bind_venc_wrap sample. Offline (full frames via memory) comes
+    // up "online 0" and runs the full 30fps. Old wrap setup kept for ref:
+    //   memset(&g_vi_wrap, 0, sizeof(g_vi_wrap));
+    //   g_vi_wrap.bEnable = RK_TRUE;
+    //   g_vi_wrap.u32BufLine = WRAP_LINE;
+    //   g_vi_wrap.u32WrapBufferSize = WRAP_LINE * VI_WIDTH * 3 / 2; // nv12
+    //   RK_MPI_VI_SetChnWrapBufAttr(0, CAM_ID, &g_vi_wrap);
 
     ret = RK_MPI_VI_EnableChn(0, CAM_ID);
     if (ret) {
@@ -183,7 +215,7 @@ static int vi_chn_init(void) {
 // ---- VENC -----------------------------------------------------------------
 static int venc_init(void) {
     VENC_CHN_ATTR_S attr;
-    VENC_CHN_BUF_WRAP_S wrap;
+    // VENC_CHN_BUF_WRAP_S wrap;  // OFFLINE mode: wrap disabled
     VENC_RECV_PIC_PARAM_S recv;
 
     memset(&attr, 0, sizeof(attr));
@@ -198,6 +230,10 @@ static int venc_init(void) {
     attr.stVencAttr.u32StreamBufCnt = 5;
     attr.stVencAttr.u32BufSize = VI_WIDTH * VI_HEIGHT * 3 / 2;
     attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
+    attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = 30;
+    attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
+    attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = 30;
+    attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
     attr.stRcAttr.stH265Cbr.u32BitRate = VENC_BITRATE_KB;
     attr.stRcAttr.stH265Cbr.u32Gop = VENC_GOP;
     attr.stGopAttr.u32MaxLtrCount = 1;
@@ -207,9 +243,11 @@ static int venc_init(void) {
         return -1;
     }
 
-    memset(&wrap, 0, sizeof(wrap));
-    wrap.bEnable = g_vi_wrap.bEnable;
-    RK_MPI_VENC_SetChnBufWrapAttr(0, &wrap);
+    // OFFLINE mode: VENC wrap DISABLED (see vi_chn_init). Old wrap setup:
+    //   memset(&wrap, 0, sizeof(wrap));
+    //   wrap.bEnable = g_vi_wrap.bEnable;
+    //   wrap.u32BufLine = WRAP_LINE;
+    //   RK_MPI_VENC_SetChnBufWrapAttr(0, &wrap);
 
     memset(&recv, 0, sizeof(recv));
     recv.s32RecvPicNum = -1; // unlimited; loop count gates stop instead
@@ -223,7 +261,7 @@ int main(int argc, char *argv[]) {
     int ret = -1;
     int c;
 
-    while ((c = getopt(argc, argv, "l:o:h")) != -1) {
+    while ((c = getopt(argc, argv, "l:o:m::g:qvh")) != -1) {
         switch (c) {
         case 'l':
             frame_cnt = atoi(optarg);
@@ -231,11 +269,29 @@ int main(int argc, char *argv[]) {
         case 'o':
             out_path = optarg;
             break;
+        case 'm':
+            g_manual_ae = true;
+            if (optarg)
+                g_manual_time = strtof(optarg, NULL);
+            break;
+        case 'g':
+            g_manual_gain = strtof(optarg, NULL);
+            break;
+        case 'q':
+            g_log_level = LOG_QUIET;
+            break;
+        case 'v':
+            g_log_level = LOG_VERBOSE;
+            break;
         case 'h':
         default:
-            printf("usage: %s [-l frames] [-o out.h265]\n", argv[0]);
+            printf("usage: %s [-l frames] [-o out.h265] [-m[time]] [-g gain] [-q|-v]\n", argv[0]);
             printf("  -l  number of frames to capture (default: until Ctrl-C)\n");
             printf("  -o  output raw HEVC path (default: %s)\n", DEFAULT_OUT_PATH);
+            printf("  -m  manual AE with optional exposure time in seconds (default: %.4f)\n", g_manual_time);
+            printf("  -g  manual AE gain (default: %.1f)\n", g_manual_gain);
+            printf("  -q  quiet: only errors and summary\n");
+            printf("  -v  verbose: per-frame output\n");
             return c == 'h' ? 0 : -1;
         }
     }
@@ -276,22 +332,61 @@ int main(int argc, char *argv[]) {
     frame.pstPack = malloc(sizeof(VENC_PACK_S));
 
     RK_S32 count = 0;
+    RK_U64 first_pts = 0, last_pts = 0;
+    RK_U64 total_bytes = 0;
     while (!g_quit) {
         if (RK_MPI_VENC_GetStream(0, &frame, -1) == RK_SUCCESS) {
             void *data = RK_MPI_MB_Handle2VirAddr(frame.pstPack->pMbBlk);
             fwrite(data, 1, frame.pstPack->u32Len, fp);
 
-            printf("frame %d seq:%d len:%u pts=%lld delay=%lldus\n", count,
-                   frame.u32Seq, frame.pstPack->u32Len, frame.pstPack->u64PTS,
-                   now_us() - frame.pstPack->u64PTS);
+            RK_U64 pts = frame.pstPack->u64PTS;
+            if (count == 0) first_pts = pts;
+            last_pts = pts;
+            total_bytes += frame.pstPack->u32Len;
+
+            if (g_log_level >= LOG_VERBOSE) {
+                printf("frame %d seq:%d len:%u pts=%lld delay=%lldus\n", count,
+                       frame.u32Seq, frame.pstPack->u32Len,
+                       (long long)pts, (long long)(now_us() - pts));
+            } else if (g_log_level >= LOG_NORMAL && (count % 30 == 0)) {
+                printf("frame %d seq:%d delay=%lldus\n", count,
+                       frame.u32Seq, (long long)(now_us() - pts));
+            }
 
             RK_MPI_VENC_ReleaseStream(0, &frame);
             count++;
+
+            if (count == 10) {
+                Uapi_ExpQueryInfo_t expInfo;
+                memset(&expInfo, 0, sizeof(expInfo));
+                if (rk_aiq_user_api2_ae_queryExpResInfo(g_aiq_ctx, &expInfo) == 0) {
+                    printf("AE: fps=%.1f VTS=%.0f HTS=%.0f pixclk=%.2fMHz "
+                           "time=%.6fs gain=%.1f converged=%d\n",
+                           expInfo.Fps,
+                           expInfo.LinePeriodsPerField,
+                           expInfo.PixelPeriodsPerLine,
+                           expInfo.PixelClockFreqMHZ,
+                           expInfo.LinAeInfo.LinearExp.integration_time,
+                           expInfo.LinAeInfo.LinearExp.analog_gain,
+                           expInfo.IsConverged);
+                }
+            }
+
             if (frame_cnt >= 0 && count >= frame_cnt)
                 break;
         }
     }
     fflush(fp);
+
+    if (count > 1 && last_pts > first_pts) {
+        double dur_s = (last_pts - first_pts) / 1e6;
+        printf("captured %d frames in %.2fs (%.1f fps), %.1f KB total\n",
+               count, dur_s, (count - 1) / dur_s, total_bytes / 1024.0);
+    } else {
+        printf("captured %d frames, %llu bytes\n", count,
+               (unsigned long long)total_bytes);
+    }
+
     free(frame.pstPack);
     ret = 0;
 

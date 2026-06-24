@@ -172,8 +172,8 @@
 									"WhiteDelay":	0
 								},
 								"AecFrameRateMode":	{
-									"isFpsFix":	0,
-									"FpsValue":	15
+									"isFpsFix":	1,
+									"FpsValue":	30
 								},
 								"AecAntiFlicker":	{
 									"enable":	1,
