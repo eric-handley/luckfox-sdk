@@ -1,7 +1,11 @@
 #!/bin/sh
 #
-# USB gadget setup — RNDIS only
+# USB gadget setup — CDC ECM
 #
+# ECM (cdc_ether) is far more reliable than RNDIS on Linux hosts; RNDIS tends to      
+# wedge the link after the first session. Fixed MACs keep the host interface name     
+# and config stable across reboots (random MACs make the host see a new NIC each      
+# boot).  
 
 CONFIGFS_DIR=/sys/kernel/config
 USB_CONFIGFS_DIR=${CONFIGFS_DIR}/usb_gadget/rockchip
@@ -26,11 +30,13 @@ start)
     echo "rockchip" > ${USB_STRINGS_DIR}/manufacturer
     echo "UVR SRAD Camera" > ${USB_STRINGS_DIR}/product
 
-    mkdir -p ${USB_FUNCTIONS_DIR}/rndis.gs0
+    mkdir -p ${USB_FUNCTIONS_DIR}/ecm.gs0                              
+    echo "02:11:22:33:44:66" > ${USB_FUNCTIONS_DIR}/ecm.gs0/dev_addr   
+    echo "02:11:22:33:44:55" > ${USB_FUNCTIONS_DIR}/ecm.gs0/host_addr  
     mkdir -p ${USB_CONFIGS_DIR}/strings/0x409
     echo 500 > ${USB_CONFIGS_DIR}/MaxPower
-    ln -s ${USB_FUNCTIONS_DIR}/rndis.gs0 ${USB_CONFIGS_DIR}/f1
-    echo rndis > ${USB_CONFIGS_DIR}/strings/0x409/configuration
+    ln -s ${USB_FUNCTIONS_DIR}/ecm.gs0 ${USB_CONFIGS_DIR}/f1           
+    echo ecm > ${USB_CONFIGS_DIR}/strings/0x409/configuration  
 
     UDC=$(ls /sys/class/udc/ | head -1)
     echo ${UDC} > ${USB_CONFIGFS_DIR}/UDC
