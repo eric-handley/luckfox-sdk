@@ -71,3 +71,7 @@ pull filepath:
 copy-iq board="172.32.0.1":
     scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/etc/iqfiles/imx519_arducam-imx519_default.json
     scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/oem/usr/share/iqfiles/imx519_arducam-imx519_default.json
+
+# Web UI to edit the IQ JSON and deploy it to the board (scp + restart streamer)
+tuner board="172.32.0.1" port="8099":
+    BOARD={{board}} PORT={{port}} node ../iq-tuner/server.js
