@@ -3216,7 +3216,7 @@
 								"Setting_len":	1
 							},
 							"TuningPara":	{
-								"enable":	1,
+								"enable":	0,
 								"thumbds_w":	8,
 								"thumbds_h":	4,
 								"trans_en":	1,
