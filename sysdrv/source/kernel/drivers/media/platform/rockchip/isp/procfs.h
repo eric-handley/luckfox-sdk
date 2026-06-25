@@ -14,6 +14,8 @@ enum {
 
 struct rkisp_procfs {
 	struct proc_dir_entry *procfs;
+	struct proc_dir_entry *alias;
+	char alias_name[128];
 	wait_queue_head_t fs_wait;
 	wait_queue_head_t fe_wait;
 	u32 mode;

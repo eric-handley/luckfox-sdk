@@ -1144,6 +1144,22 @@ int rkisp_proc_init(struct rkisp_device *dev)
 	dev->procfs.procfs = proc_create_data(dev->name, 0, NULL, &ops, dev);
 	if (!dev->procfs.procfs)
 		return -EINVAL;
+
+	/*
+	 * rkaiq_tool_server probes the ISP-index-qualified node name
+	 * "rkispN-virM" (e.g. /proc/rkisp0-vir0) for online/offline detection.
+	 * On single-ISP SoCs (e.g. RV1106) the device is named "rkisp-vir0"
+	 * without the ISP index, so that cat fails and the tool's capture path
+	 * breaks. Register an index-qualified alias to the same data so both
+	 * names resolve; the original node name is left untouched.
+	 */
+	if (!strncmp(dev->name, "rkisp-", 6)) {
+		snprintf(dev->procfs.alias_name, sizeof(dev->procfs.alias_name),
+			 "rkisp%d%s", dev->dev_id, dev->name + 5);
+		dev->procfs.alias = proc_create_data(dev->procfs.alias_name, 0,
+						     NULL, &ops, dev);
+	}
+
 	init_waitqueue_head(&dev->procfs.fs_wait);
 	init_waitqueue_head(&dev->procfs.fe_wait);
 	return 0;
@@ -1151,6 +1167,9 @@ int rkisp_proc_init(struct rkisp_device *dev)
 
 void rkisp_proc_cleanup(struct rkisp_device *dev)
 {
+	if (dev->procfs.alias)
+		remove_proc_entry(dev->procfs.alias_name, NULL);
+	dev->procfs.alias = NULL;
 	if (dev->procfs.procfs)
 		remove_proc_entry(dev->name, NULL);
 	dev->procfs.procfs = NULL;
