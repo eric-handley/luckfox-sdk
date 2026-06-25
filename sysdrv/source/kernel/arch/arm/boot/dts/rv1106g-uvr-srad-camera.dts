@@ -150,6 +150,7 @@
         rockchip,camera-module-facing = "back";
         rockchip,camera-module-name = "arducam-imx519";
         rockchip,camera-module-lens-name = "default";
+        lens-focus = <&ak7375>;
         port {
             imx519_out: endpoint {
                 remote-endpoint = <&csi_dphy_input1>;
@@ -157,6 +158,15 @@
                 link-frequencies = /bits/ 64 <493500000>;
             };
         };
+    };
+
+    /* AK7375 VCM (autofocus). Mainline driver: manual focus via
+     * V4L2_CID_FOCUS_ABSOLUTE. Continuous AF (rkaiq) needs the Rockchip
+     * vcm framework + lens-focus link added later. */
+    ak7375: ak7375@c {
+        compatible = "asahi-kasei,ak7375";
+        status = "okay";
+        reg = <0x0c>;
     };
 };
 

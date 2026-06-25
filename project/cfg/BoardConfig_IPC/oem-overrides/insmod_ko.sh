@@ -18,6 +18,9 @@ __insmod rk_dvbm.ko
 # --- Camera sensor (step 1: probe only, ISP/CIF pipeline still disabled) ---
 __insmod imx519.ko
 
+# --- AK7375 VCM (autofocus lens actuator at i2c3 0x0c) ---
+__insmod ak7375.ko
+
 # --- Camera sensor modules (disabled, re-enable when camera is integrated) ---
 # videobuf2-* are built-in (CONFIG_VIDEOBUF2_*=y), no insmod needed
 # __insmod imx415.ko
