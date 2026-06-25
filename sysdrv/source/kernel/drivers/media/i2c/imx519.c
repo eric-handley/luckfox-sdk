@@ -64,10 +64,19 @@
 #define IMX519_EXPOSURE_DEFAULT             0x3e8
 
 #define IMX519_REG_ANALOG_GAIN              0x0204
-#define IMX519_ANA_GAIN_MIN                 0
-#define IMX519_ANA_GAIN_MAX                 960
+/*
+ * The sensor analog gain register uses the Sony reciprocal form:
+ *     real_gain = 1024 / (1024 - code),  code = 0..960 -> 1x..16x
+ * rkaiq's Gain2Reg can only emit a linear "a*G + b" value, so the control
+ * carries the gain in 1/256 units (real_gain * 256) and imx519_set_ctrl()
+ * converts it back to a register code. Range 256..4096 == 1x..16x.
+ */
+#define IMX519_ANA_GAIN_FIXED_POINT         256
+#define IMX519_ANA_GAIN_CODE_BASE           1024
+#define IMX519_ANA_GAIN_MIN                 256
+#define IMX519_ANA_GAIN_MAX                 4096
 #define IMX519_ANA_GAIN_STEP                1
-#define IMX519_ANA_GAIN_DEFAULT             0
+#define IMX519_ANA_GAIN_DEFAULT             256
 
 #define IMX519_REG_DIGITAL_GAIN             0x020e
 #define IMX519_DGTL_GAIN_MIN                0x0100
@@ -1212,8 +1221,12 @@ static int imx519_set_ctrl(struct v4l2_ctrl *ctrl)
                        IMX519_REG_VALUE_16BIT, ctrl->val);
         break;
     case V4L2_CID_ANALOGUE_GAIN:
+        /* ctrl->val is real_gain * 256; convert to reciprocal code */
+        val = IMX519_ANA_GAIN_CODE_BASE -
+              (IMX519_ANA_GAIN_CODE_BASE * IMX519_ANA_GAIN_FIXED_POINT) /
+              ctrl->val;
         ret = imx519_write_reg(client, IMX519_REG_ANALOG_GAIN,
-                       IMX519_REG_VALUE_16BIT, ctrl->val);
+                       IMX519_REG_VALUE_16BIT, val);
         break;
     case V4L2_CID_DIGITAL_GAIN:
         ret = imx519_write_reg(client, IMX519_REG_DIGITAL_GAIN,

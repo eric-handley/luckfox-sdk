@@ -1,12 +1,12 @@
 {
 	"sensor_calib":	{
 		"resolution":	{
-			"width":	3840,
-			"height":	2160
+			"width":	1920,
+			"height":	1080
 		},
 		"Gain2Reg":	{
-			"GainMode":	"EXPGAIN_MODE_NONLINEAR_DB",
-			"GainRange":	[1, 246.45, 16, 0, 1, 16, 3943],
+			"GainMode":	"EXPGAIN_MODE_LINEAR",
+			"GainRange":	[1, 16, 256, 0, 1, 256, 4096],
 			"GainRange_len":	7
 		},
 		"Time2Reg":	{
@@ -15,7 +15,7 @@
 		"CISGainSet":	{
 			"CISAgainRange":	{
 				"Min":	1,
-				"Max":	31.6
+				"Max":	16
 			},
 			"CISExtraAgainRange":	{
 				"Min":	1,
@@ -23,7 +23,7 @@
 			},
 			"CISDgainRange":	{
 				"Min":	1,
-				"Max":	125.9
+				"Max":	1
 			},
 			"CISIspDgainRange":	{
 				"Min":	1,
@@ -33,9 +33,9 @@
 		},
 		"CISTimeSet":	{
 			"Linear":	{
-				"CISTimeRegMin":	8,
+				"CISTimeRegMin":	20,
 				"CISLinTimeRegMaxFac":	{
-					"fCoeff":	[1, 26]
+					"fCoeff":	[1, 32]
 				},
 				"CISTimeRegOdevity":	{
 					"fCoeff":	[1, 0]
@@ -70,7 +70,7 @@
 				}]
 		},
 		"CISHdrSet":	{
-			"hdr_en":	1,
+			"hdr_en":	0,
 			"hdr_mode":	"RK_AIQ_ISP_HDR_MODE_2_LINE_HDR",
 			"line_mode":	"RKAIQ_SENSOR_HDR_MODE_STAGGER"
 		},
