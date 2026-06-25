@@ -160,13 +160,22 @@
         };
     };
 
-    /* AK7375 VCM (autofocus). Mainline driver: manual focus via
-     * V4L2_CID_FOCUS_ABSOLUTE. Continuous AF (rkaiq) needs the Rockchip
-     * vcm framework + lens-focus link added later. */
+    /* AK7375 VCM (autofocus). Driver ported onto the Rockchip rk_cam_vcm
+     * framework so rkaiq can drive continuous AF. The vcm-*-current props
+     * map the logical-position range across the 12-bit DAC; the AK7375 has
+     * no real current rating, so these are DAC proxies (start 0 -> rated
+     * full-scale). module-index/facing are required by the driver's DT
+     * parse and must match the sensor. */
     ak7375: ak7375@c {
         compatible = "asahi-kasei,ak7375";
         status = "okay";
         reg = <0x0c>;
+        rockchip,camera-module-index = <0>;
+        rockchip,camera-module-facing = "back";
+        rockchip,vcm-max-current = <100>;
+        rockchip,vcm-start-current = <0>;
+        rockchip,vcm-rated-current = <100>;
+        rockchip,vcm-step-mode = <0>;
     };
 };
 
