@@ -75,3 +75,25 @@ copy-iq board="172.32.0.1":
 # Web UI to edit the IQ JSON and deploy it to the board (scp + restart streamer)
 tuner board="172.32.0.1" port="8099":
     BOARD={{board}} PORT={{port}} node ../iq-tuner/server.js
+
+deploy board="172.32.0.1" deploy="true":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    streamer="simple_vi_bind_venc_rtsp -I 0 -w 1920 -h 1080 -e h265"
+    proc="simple_vi_bind_venc_rtsp"
+    if [ "{{deploy}}" = "true" ]; then
+        scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/etc/iqfiles/imx519_arducam-imx519_default.json
+        scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/oem/usr/share/iqfiles/imx519_arducam-imx519_default.json
+    else
+        echo "deploy=false: skipping IQ JSON copy"
+    fi
+    # newlines (not "; ") so the "nohup ... &" line isn't followed by ";" (busybox sh)
+    ssh root@{{board}} "$(printf '%s\n' \
+        '. /etc/profile >/dev/null 2>&1 || true' \
+        "killall $proc 2>/dev/null || true" \
+        'sleep 1' \
+        "nohup $streamer >/tmp/streamer.log 2>&1 &" \
+        'sleep 2' \
+        "pidof $proc && echo STREAMER_RUNNING || echo STREAMER_DOWN" \
+        'echo "--- /tmp/streamer.log tail ---"' \
+        'tail -n 20 /tmp/streamer.log 2>/dev/null')"
