@@ -6,7 +6,9 @@
  * Sony IMX519 register tables from the Arducam IMX519 driver
  * (Copyright (C) 2021 Arducam Technology co., Ltd.).
  *
- * Bring-up scope: single 2-lane SRGGB10 1920x1080 mode, no HDR, no autofocus.
+ * Bring-up scope: single 4-lane SRGGB10 3072x1728 no-bin center-crop 30fps
+ * mode, no HDR, no autofocus.  The RV1106 ISP downscales this 1.6:1 to
+ * 1920x1080 (supersample) for a sharper, properly anti-aliased 1080p output.
  */
 
 #include <linux/clk.h>
@@ -36,16 +38,13 @@
 #define V4L2_CID_DIGITAL_GAIN               V4L2_CID_GAIN
 #endif
 
-#define IMX519_LINK_FREQ_493M               493500000
-
-/* The sensor's internal pixel clock is fixed by the PLL registers and is
- * independent of the number of MIPI lanes.  The MIPI serializer packs
- * pixels into fewer lanes at a higher per-lane bit rate, but the pixel
- * production rate stays the same.  This value matches the Arducam and
- * Raspberry Pi reference drivers.  Do NOT derive it from link_freq. */
-#define IMX519_PIXEL_RATE                   426666667
-
-#define IMX519_2LANES                       2
+/*
+ * Per-lane MIPI DDR clock produced by the PLL block in the mode register
+ * tables (0x0305-0x030f).  This matches the Raspberry Pi reference driver,
+ * which advertises 408 MHz for this exact PLL configuration.  pixel_rate is
+ * derived from this and the active lane count (see imx519_set_fmt).
+ */
+#define IMX519_LINK_FREQ_408M               408000000
 
 #define IMX519_XVCLK_FREQ_24M               24000000
 
@@ -444,29 +443,45 @@ static const struct regval imx519_mode_common_regs[] = {
     {REG_NULL, 0x00},
 };
 
-/* 1920x1080 2-lane SRGGB10 */
-static const struct regval imx519_linear_10bit_1920x1080_regs[] = {
+/*
+ * 3072x1728 no-binning center crop, 4-lane SRGGB10.
+ *
+ * Center crop of the 4656x3496 array (no binning, 0x0900=0x00 0x0901=0x11) so
+ * each output pixel is a real photosite; the RV1106 ISP (max input 3072x1728)
+ * then downscales 3072x1728 -> 1920x1080 (1.6:1 supersample).  Crop window:
+ *   x: 792..3863  (0x0344=0x0318, 0x0348=0x0f17)  -> 3072 wide
+ *   y: 884..2611  (0x0346=0x0374, 0x034a=0x0a33)  -> 1728 tall
+ * Differences from the RPi 2-lane table:
+ *   - 0x0114 = 0x03         : 4 CSI data lanes (was 0x01)
+ *   - recropped to 3072x1728 from the RPi 3840x2160 no-bin template.
+ * The PLL block (0x0305-0x030f) and the per-lane MIPI rate (0x0820/0x0821)
+ * are left exactly as the RPi table, i.e. 408 MHz per lane.
+ *
+ * With line_length 6512 (0x1970) and frame_length 2184 (0x0888) the readout
+ * runs at 426.67M / (6512 * 2184) = 30 fps.
+ */
+static const struct regval imx519_linear_10bit_3072x1728_regs[] = {
     {0x0111, 0x02},
     {0x0112, 0x0a},
     {0x0113, 0x0a},
-    {0x0114, 0x01},
-    {0x0342, 0x17},
-    {0x0343, 0x8b},
-    {0x0340, 0x04},
-    {0x0341, 0x9c},
-    {0x0344, 0x01},
-    {0x0345, 0x98},
-    {0x0346, 0x02},
-    {0x0347, 0xa2},
-    {0x0348, 0x10},
-    {0x0349, 0x97},
-    {0x034a, 0x0b},
-    {0x034b, 0x15},
+    {0x0114, 0x03},
+    {0x0342, 0x19},
+    {0x0343, 0x70},
+    {0x0340, 0x08},
+    {0x0341, 0x88},
+    {0x0344, 0x03},
+    {0x0345, 0x18},
+    {0x0346, 0x03},
+    {0x0347, 0x74},
+    {0x0348, 0x0f},
+    {0x0349, 0x17},
+    {0x034a, 0x0a},
+    {0x034b, 0x33},
     {0x0220, 0x00},
     {0x0221, 0x11},
     {0x0222, 0x01},
-    {0x0900, 0x01},
-    {0x0901, 0x22},
+    {0x0900, 0x00},
+    {0x0901, 0x11},
     {0x0902, 0x0a},
     {0x3f4c, 0x01},
     {0x3f4d, 0x01},
@@ -478,14 +493,14 @@ static const struct regval imx519_linear_10bit_1920x1080_regs[] = {
     {0x0409, 0x00},
     {0x040a, 0x00},
     {0x040b, 0x00},
-    {0x040c, 0x07},
-    {0x040d, 0x80},
-    {0x040e, 0x04},
-    {0x040f, 0x38},
-    {0x034c, 0x07},
-    {0x034d, 0x80},
-    {0x034e, 0x04},
-    {0x034f, 0x38},
+    {0x040c, 0x0c},
+    {0x040d, 0x00},
+    {0x040e, 0x06},
+    {0x040f, 0xc0},
+    {0x034c, 0x0c},
+    {0x034d, 0x00},
+    {0x034e, 0x06},
+    {0x034f, 0xc0},
     {0x0301, 0x06},
     {0x0303, 0x04},
     {0x0305, 0x06},
@@ -502,8 +517,16 @@ static const struct regval imx519_linear_10bit_1920x1080_regs[] = {
     {0x0822, 0x00},
     {0x0823, 0x00},
     {0x3e20, 0x01},
-    {0x3e37, 0x00},
+    {0x3e37, 0x01},
     {0x3e3b, 0x00},
+    {0x38a4, 0x00},
+    {0x38a5, 0x00},
+    {0x38a6, 0x00},
+    {0x38a7, 0x00},
+    {0x38a8, 0x00},
+    {0x38a9, 0xf0},
+    {0x38aa, 0x00},
+    {0x38ab, 0xb4},
     {0x0106, 0x00},
     {0x0b00, 0x00},
     {0x3230, 0x00},
@@ -522,20 +545,20 @@ static const struct regval imx519_linear_10bit_1920x1080_regs[] = {
     {REG_NULL, 0x00},
 };
 
-static const struct imx519_mode supported_modes_2lane[] = {
+static const struct imx519_mode supported_modes[] = {
     {
         .bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
-        .width = 1920,
-        .height = 1080,
+        .width = 3072,
+        .height = 1728,
         .max_fps = {
             .numerator = 10000,
-            .denominator = 600000,
+            .denominator = 300000,
         },
         .exp_def = IMX519_EXPOSURE_DEFAULT,
-        .hts_def = 0x178b,
-        .vts_def = 0x049c,
+        .hts_def = 0x1970,
+        .vts_def = 0x0888,
         .global_reg_list = imx519_mode_common_regs,
-        .reg_list = imx519_linear_10bit_1920x1080_regs,
+        .reg_list = imx519_linear_10bit_3072x1728_regs,
         .hdr_mode = NO_HDR,
         .mipi_freq_idx = 0,
         .bpp = 10,
@@ -545,7 +568,7 @@ static const struct imx519_mode supported_modes_2lane[] = {
 };
 
 static const s64 link_freq_items[] = {
-    IMX519_LINK_FREQ_493M,
+    IMX519_LINK_FREQ_408M,
 };
 
 static const char * const imx519_test_pattern_menu[] = {
@@ -691,6 +714,8 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
     struct imx519 *imx519 = to_imx519(sd);
     const struct imx519_mode *mode;
     s64 h_blank, vblank_def;
+    u32 lane_num = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
+    u64 pixel_rate;
 
     mutex_lock(&imx519->mutex);
 
@@ -717,7 +742,9 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
                      1, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->vblank, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
-        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, IMX519_PIXEL_RATE);
+        pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
+                 mode->bpp * 2 * lane_num;
+        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, pixel_rate);
     }
 
     mutex_unlock(&imx519->mutex);
@@ -1284,6 +1311,8 @@ static int imx519_initialize_controls(struct imx519 *imx519)
     struct v4l2_ctrl_handler *handler;
     s64 exposure_max, vblank_def;
     u32 h_blank;
+    u32 lane_num = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
+    u64 pixel_rate;
     int ret;
 
     handler = &imx519->ctrl_handler;
@@ -1299,8 +1328,10 @@ static int imx519_initialize_controls(struct imx519 *imx519)
                 link_freq_items);
     v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
 
+    pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
+             mode->bpp * 2 * lane_num;
     imx519->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
-        V4L2_CID_PIXEL_RATE, 0, IMX519_PIXEL_RATE, 1, IMX519_PIXEL_RATE);
+        V4L2_CID_PIXEL_RATE, 0, pixel_rate, 1, pixel_rate);
 
     h_blank = mode->hts_def - mode->width;
     imx519->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,
@@ -1423,8 +1454,8 @@ static int imx519_probe(struct i2c_client *client,
     }
 
     imx519->client = client;
-    imx519->supported_modes = supported_modes_2lane;
-    imx519->cfg_num = ARRAY_SIZE(supported_modes_2lane);
+    imx519->supported_modes = supported_modes;
+    imx519->cfg_num = ARRAY_SIZE(supported_modes);
     imx519->cur_mode = &imx519->supported_modes[0];
     dev_info(dev, "detect imx519 lane %d\n",
          imx519->bus_cfg.bus.mipi_csi2.num_data_lanes);

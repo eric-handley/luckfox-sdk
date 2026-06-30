@@ -1,8 +1,13 @@
-// UVR SRAD Camera capture - RV1106G2 + Arducam IMX519 (2-lane MIPI)
+// UVR SRAD Camera capture - RV1106G2 + Arducam IMX519 (4-lane MIPI)
 //
 // Self-contained capture: runs the rkaiq 3A engine in-process (no separate
 // rkaiq_3A_server needed) and streams VI -> VENC over the RV1106 wrap/online
 // (DVBM) path, writing a raw HEVC elementary stream to a file.
+//
+// The IMX519 reads out a 3072x1728 no-binning center crop and the RV1106 ISP
+// main-path scaler downscales it 1.6:1 to 1920x1080 (supersample) for a
+// sharper, properly anti-aliased 1080p output. The ISP input size is set
+// via stIspOpt.stMaxSize; the channel stSize is the downscaled output.
 //
 // Distilled from the Rockchip simple_test samples
 // (simple_vi_bind_venc_wrap_rv1106.c + simple_vi_bind_venc_rtsp.c) with every
@@ -31,7 +36,9 @@
 
 // ---- our fixed setup ------------------------------------------------------
 #define CAM_ID            0                 // rkisp main path
-#define VI_WIDTH          1920
+#define ISP_IN_WIDTH      3072              // sensor no-bin crop (ISP scaler input)
+#define ISP_IN_HEIGHT     1728
+#define VI_WIDTH          1920              // ISP downscaled output (VENC input)
 #define VI_HEIGHT         1080
 #define VI_BUF_COUNT      3
 #define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
@@ -179,8 +186,10 @@ static int vi_chn_init(void) {
     attr.stSize.u32Width = VI_WIDTH;
     attr.stSize.u32Height = VI_HEIGHT;
     attr.enPixelFormat = RK_FMT_YUV420SP;
-    attr.stIspOpt.stMaxSize.u32Width = VI_WIDTH;
-    attr.stIspOpt.stMaxSize.u32Height = VI_HEIGHT;
+    // stMaxSize is the ISP input (sensor) resolution; stSize is the scaled
+    // output. The rkisp main-path scaler downscales 3072x1728 -> 1920x1080.
+    attr.stIspOpt.stMaxSize.u32Width = ISP_IN_WIDTH;
+    attr.stIspOpt.stMaxSize.u32Height = ISP_IN_HEIGHT;
     // depth must be >=1 (and < u32BufCount) when binding to VENC, otherwise
     // GetStream blocks forever; framerate -1 = inherit sensor cadence.
     attr.u32Depth = 1;

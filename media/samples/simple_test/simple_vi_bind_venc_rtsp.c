@@ -206,6 +206,11 @@ int vi_chn_init(int channelId, int width, int height) {
 	    VI_V4L2_MEMORY_TYPE_DMABUF; // VI_V4L2_MEMORY_TYPE_MMAP;
 	vi_chn_attr.stSize.u32Width = width;
 	vi_chn_attr.stSize.u32Height = height;
+	// IMX519 reads out a 3072x1728 no-bin crop; tell the VI the ISP input
+	// size so the rkisp main-path scaler downscales it to the requested
+	// stSize (e.g. 1920x1080 supersample) instead of mis-sizing buffers.
+	vi_chn_attr.stIspOpt.stMaxSize.u32Width = 3072;
+	vi_chn_attr.stIspOpt.stMaxSize.u32Height = 1728;
 	vi_chn_attr.enPixelFormat = RK_FMT_YUV420SP;
 	vi_chn_attr.enCompressMode = COMPRESS_MODE_NONE; // COMPRESS_AFBC_16x16;
 	vi_chn_attr.u32Depth = 0; //0, get fail, 1 - u32BufCount, can get, if bind to other device, must be < u32BufCount

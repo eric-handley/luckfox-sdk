@@ -129,10 +129,10 @@
 };
 
 /* Repurpose the inherited imx415 dphy input (port@0/endpoint@1) for the
- * imx519 on i2c3, at 2 lanes. The inherited i2c4 sensors stay disabled. */
+ * imx519 on i2c3, at 4 lanes. The inherited i2c4 sensors stay disabled. */
 &csi_dphy_input1 {
     remote-endpoint = <&imx519_out>;
-    data-lanes = <1 2>;
+    data-lanes = <1 2 3 4>;
 };
 
 &i2c3 {
@@ -154,8 +154,8 @@
         port {
             imx519_out: endpoint {
                 remote-endpoint = <&csi_dphy_input1>;
-                data-lanes = <1 2>;
-                link-frequencies = /bits/ 64 <493500000>;
+                data-lanes = <1 2 3 4>;
+                link-frequencies = /bits/ 64 <408000000>;
             };
         };
     };
