@@ -29,7 +29,7 @@
 				"Min": 1,
 				"Max": 4
 			},
-			"CISHdrGainIndSetEn": 1
+			"CISHdrGainIndSetEn": 0
 		},
 		"CISTimeSet": {
 			"Linear": {
@@ -44,7 +44,7 @@
 			"Hdr": [
 				{
 					"name": "HDR_TWO_FRAME",
-					"CISTimeRegUnEqualEn": 1,
+					"CISTimeRegUnEqualEn": 0,
 					"CISTimeRegMin": 2,
 					"CISHdrTimeRegSumFac": {
 						"fCoeff": [1, 26]
@@ -58,7 +58,7 @@
 				},
 				{
 					"name": "HDR_THREE_FRAME",
-					"CISTimeRegUnEqualEn": 1,
+					"CISTimeRegUnEqualEn": 0,
 					"CISTimeRegMin": 3,
 					"CISHdrTimeRegSumFac": {
 						"fCoeff": [1, 39]
@@ -885,7 +885,7 @@
 							"autoExtPara": {
 								"lightSourceForFirstFrame": "D50",
 								"smartRun": {
-									"enable": 1,
+									"enable": 0,
 									"cfg": {
 										"lumaValue": [0],
 										"lumaValue_len": 1,
@@ -932,7 +932,7 @@
 									"lutAll_len": 1
 								},
 								"wbGainDaylightClip": {
-									"enable": 0,
+									"enable": 1,
 									"outdoor_cct_min": 5000
 								},
 								"wbGainClip": {
@@ -978,7 +978,7 @@
 									"varThforDamp": 0.005
 								},
 								"xyRegionStableSelection": {
-									"enable": 1,
+									"enable": 0,
 									"wpNumTh": {
 										"lumaValue": [0],
 										"lumaValue_len": 1,
@@ -993,7 +993,7 @@
 								"weightForNightGainCalc": [25, 25, 25, 25],
 								"weightForNightGainCalc_len": 4,
 								"singleColorProces": {
-									"enable": 1,
+									"enable": 0,
 									"mode": "AWB_SGC_CALL_INITIAL",
 									"colorBlock": [
 										{
@@ -1081,7 +1081,7 @@
 								"lineRgProjCCT": [1, -0.000281, 0.559075],
 								"remosaicCfg": {
 									"enable": 0,
-									"applyInvWbGainEnable": 1,
+									"applyInvWbGainEnable": 0,
 									"sensorWbGain": [1, 1, 1, 1]
 								},
 								"wbGainOffset": {
@@ -1089,10 +1089,10 @@
 									"offset": [0, 0, 0, 0]
 								},
 								"avaSiteRec": {
-									"enable": 1,
+									"enable": 0,
 									"frameNum": 3,
 									"fullFileName": "/tmp/avaSiteInfo",
-									"avaEnable": 1,
+									"avaEnable": 0,
 									"wbgainTh": 0.2,
 									"lvValueTh": 2
 								}
@@ -1123,7 +1123,7 @@
 								"enable": 1,
 								"BLC_OB_Data": {
 									"ISO": [50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400, 204800],
-									"isp_ob_Offset": [4.25, 4.75, 4.125, 8.3125, 18.0625, 34.875, 70.8, 149.438, 212.563, 500, 500, 390.5, 390.5],
+									"isp_ob_Offset": [0, 0, 0, 0, 18.0625, 34.875, 70.8, 149.438, 212.563, 500, 500, 390.5, 390.5],
 									"isp_ob_preDgain": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 								}
 							}
@@ -1280,7 +1280,7 @@
 								"enh_rgb2y_para": [38, 75, 15]
 							},
 							"TuningPara": {
-								"damp_enable": 1,
+								"damp_enable": 0,
 								"illu_estim": {
 									"interp_enable": 0,
 									"default_illu": "A",
@@ -1628,7 +1628,7 @@
 								},
 								"g_filter": {
 									"iso": [50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400, 204800],
-									"debayer_gfilter_en": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+									"debayer_gfilter_en": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
 									"debayer_gfilter_offset": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 								},
 								"c_filter": {
@@ -1701,7 +1701,7 @@
 								"CtrlDataType": "CTRLDATATYPE_ISO",
 								"DrcGain": {
 									"CtrlData": [50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, 102400, 204800],
-									"DrcGain": [1.7, 1.6, 1.5, 1.5, 1.4, 1.4, 1.4, 1.35, 1.25, 1.2, 1, 1, 1],
+									"DrcGain": [1.15, 1.15, 1.15, 1.15, 1.15, 1.15, 1.15, 1.15, 1.15, 1.1, 1, 1, 1],
 									"Alpha": [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
 									"Clip": [16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]
 								},
@@ -1758,13 +1758,13 @@
 						},
 						"adehaze_calib_v12": {
 							"DehazeTuningPara": {
-								"Enable": 1,
+								"Enable": 0,
 								"CtrlDataType": "CTRLDATATYPE_ISO",
 								"cfg_alpha": 0,
 								"ByPassThr": 0.01,
 								"dehaze_setting": {
 									"en": 0,
-									"air_lc_en": 1,
+									"air_lc_en": 0,
 									"stab_fnum": 8,
 									"sigma": 255,
 									"wt_sigma": 8,
@@ -1797,8 +1797,8 @@
 									}
 								},
 								"enhance_setting": {
-									"en": 1,
-									"color_deviate_en": 1,
+									"en": 0,
+									"color_deviate_en": 0,
 									"enh_luma_en": 0,
 									"EnhanceData": [
 										{
@@ -1989,10 +1989,10 @@
 							"DpccTuningPara": {
 								"Enable": 1,
 								"Fast_Mode": {
-									"Fast_mode_en": 1,
-									"Single_enable": 1,
-									"Double_enable": 1,
-									"Triple_enable": 1,
+									"Fast_mode_en": 0,
+									"Single_enable": 0,
+									"Double_enable": 0,
+									"Triple_enable": 0,
 									"Fast_Data": {
 										"ISO": [50],
 										"ISO_len": 1,
@@ -2005,7 +2005,7 @@
 									}
 								},
 								"Expert_Mode": {
-									"stage1_Enable": 1,
+									"stage1_Enable": 0,
 									"grayscale_mode": 0,
 									"dpcc_out_sel": 1,
 									"stage1_g_3x3": 0,
@@ -2149,7 +2149,7 @@
 									"forward_med": 0
 								},
 								"Sensor_dpcc": {
-									"sensor_dpcc_auto_en": 1,
+									"sensor_dpcc_auto_en": 0,
 									"max_level": 1,
 									"SensorDpcc_Data": {
 										"ISO": [50],
@@ -2189,15 +2189,15 @@
 						"cproc": {
 							"param": {
 								"enable": 1,
-								"brightness": 128,
-								"contrast": 128,
-								"saturation": 128,
+								"brightness": 75,
+								"contrast": 175,
+								"saturation": 117,
 								"hue": 128
 							}
 						},
 						"ie": {
 							"param": {
-								"enable": 1,
+								"enable": 0,
 								"mode": 0
 							}
 						},
@@ -2220,7 +2220,7 @@
 								"resolutionAll_len": 1
 							},
 							"alscCoef": {
-								"damp_enable": 1,
+								"damp_enable": 0,
 								"illAll": [
 									{
 										"usedForCase": 0,
@@ -3077,7 +3077,7 @@
 								"Blc_Ref_len": 13
 							},
 							"TuningPara": {
-								"enable": 1,
+								"enable": 0,
 								"hdrdgain_ctrl_en": 0,
 								"Setting": [
 									{
@@ -3499,8 +3499,8 @@
 								"enable": 0,
 								"thumbds_w": 8,
 								"thumbds_h": 4,
-								"trans_en": 1,
-								"lo_enable": 1,
+								"trans_en": 0,
+								"lo_enable": 0,
 								"Setting": [
 									{
 										"SNR_Mode": "LSNR",
@@ -3508,7 +3508,7 @@
 										"Tuning_ISO": [
 											{
 												"iso": 50,
-												"hi_enable": 1,
+												"hi_enable": 0,
 												"lo_med_en": 0,
 												"lo_gsbay_en": 0,
 												"lo_gslum_en": 0,
@@ -3543,12 +3543,12 @@
 											},
 											{
 												"iso": 100,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3578,12 +3578,12 @@
 											},
 											{
 												"iso": 200,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3614,11 +3614,11 @@
 											{
 												"iso": 400,
 												"hi_enable": 0,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3648,12 +3648,12 @@
 											},
 											{
 												"iso": 800,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3683,12 +3683,12 @@
 											},
 											{
 												"iso": 1600,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3718,12 +3718,12 @@
 											},
 											{
 												"iso": 3200,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3753,12 +3753,12 @@
 											},
 											{
 												"iso": 6400,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3788,12 +3788,12 @@
 											},
 											{
 												"iso": 12800,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3823,12 +3823,12 @@
 											},
 											{
 												"iso": 25600,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3858,12 +3858,12 @@
 											},
 											{
 												"iso": 51200,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 1,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
@@ -3894,11 +3894,11 @@
 											{
 												"iso": 102400,
 												"hi_enable": 0,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 0,
 												"wgt_mge_mode": 0,
 												"hi_guass": 0,
@@ -3928,17 +3928,17 @@
 											},
 											{
 												"iso": 204800,
-												"hi_enable": 1,
-												"lo_med_en": 1,
-												"lo_gsbay_en": 1,
-												"lo_gslum_en": 1,
-												"hi_med_en": 1,
-												"hi_gslum_en": 1,
+												"hi_enable": 0,
+												"lo_med_en": 0,
+												"lo_gsbay_en": 0,
+												"lo_gslum_en": 0,
+												"hi_med_en": 0,
+												"hi_gslum_en": 0,
 												"wgt_use_mode": 0,
 												"wgt_mge_mode": 1,
 												"hi_guass": 0,
 												"kl_guass": 0,
-												"global_pk_en": 1,
+												"global_pk_en": 0,
 												"global_pksq": 1024,
 												"lo_filter_strength": 1,
 												"hi_filter_strength": 1,
@@ -4061,7 +4061,7 @@
 								"Setting_len": 1
 							},
 							"TuningPara": {
-								"enable": 1,
+								"enable": 0,
 								"Setting": [
 									{
 										"SNR_Mode": "LSNR",
@@ -4649,7 +4649,7 @@
 						"cnr_v30": {
 							"Version": "V1",
 							"TuningPara": {
-								"enable": 1,
+								"enable": 0,
 								"Setting": [
 									{
 										"SNR_Mode": "LSNR",
@@ -5949,7 +5949,7 @@
 						"gain_v2": {
 							"Version": "V2",
 							"TuningPara": {
-								"hdrgain_ctrl_enable": 1,
+								"hdrgain_ctrl_enable": 0,
 								"Setting": [
 									{
 										"SNR_Mode": "LSNR",

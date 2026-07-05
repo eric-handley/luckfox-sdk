@@ -14,13 +14,7 @@ export RK_JOBS=16
 export RK_APP_TYPE=RKIPC_RV1106
 
 # Config CMA size in environment.
-# This board is RV1106G2 (1Gb DDR3L = 128MB total). The inherited Pico Zero
-# value of 100M is for a 256MB board and starves the 128MB kernel (~19MB left),
-# causing rkisp-vir0 probe to fail with -ENOMEM.
-# The no-bin 3072x1728 supersample pipeline allocates ~8MB VI buffers (vs ~3MB
-# at binned 1080p), so 32M is too tight: VENC's contiguous alloc fails and
-# crashes the board on VCODEC_CHAN_CREATE. 64M fits the larger buffers + VENC
-# and still leaves Linux ~55MB managed.
+# This board is RV1106G2 (1Gb DDR3L = 128MB total)
 export RK_BOOTARGS_CMA_SIZE="64M"
 
 # Kernel dts
@@ -99,10 +93,7 @@ export RK_KERNEL_DEFCONFIG=uvr_srad_camera_linux_defconfig
 # Config sensor IQ files
 # RK_CAMERA_SENSOR_IQFILES format:
 #     "iqfile1 iqfile2 iqfile3 ..."
-# ./build.sh media and copy <SDK root dir>/output/out/media_out/isp_iqfiles/$RK_CAMERA_SENSOR_IQFILES
-# Placeholder: imx519 IQ is a copy of the imx415 tuning (same ISP V32). rkaiq
-# resolves <sensor>_<module-name>_<lens-name>.json from DT (arducam-imx519 /
-# default). Color/shading will be mistuned until a real IMX519 IQ exists (step 6).
+# resolves <sensor>_<module-name>_<lens-name>.json from DT (arducam-imx519) /
 export RK_CAMERA_SENSOR_IQFILES="imx519_arducam-imx519_default.json"
 
 # Config sensor lens CAC calibrattion bin files
