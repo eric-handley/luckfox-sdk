@@ -155,7 +155,7 @@
             imx519_out: endpoint {
                 remote-endpoint = <&csi_dphy_input1>;
                 data-lanes = <1 2 3 4>;
-                link-frequencies = /bits/ 64 <408000000>;
+                link-frequencies = /bits/ 64 <664000000>;
             };
         };
     };

@@ -17,7 +17,7 @@ build:
     docker run --rm -v "$(pwd):/workspace" --tmpfs /tmp:exec -u $(id -u):$(id -g) luckfox-sdk-builder ./build.sh | tee logs/docker-build-$(date +%Y-%m-%d_%H:%M:%S).log
 
 # Build the uvr-vicap capture binary in the container and copy it to the board
-vicap board="172.32.0.1" dest="":
+vicap board="172.32.0.1" dest="/oem/usr/bin/":
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f media/samples/simple_test/uvr-vicap

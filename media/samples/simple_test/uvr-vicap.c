@@ -183,8 +183,8 @@ static int vi_chn_init(void) {
     memset(&attr, 0, sizeof(attr));
     attr.stIspOpt.u32BufCount = VI_BUF_COUNT;
     attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
-    attr.stSize.u32Width = VI_WIDTH;
-    attr.stSize.u32Height = VI_HEIGHT;
+    attr.stSize.u32Width = ISP_IN_WIDTH;
+    attr.stSize.u32Height = ISP_IN_HEIGHT;
     attr.enPixelFormat = RK_FMT_YUV420SP;
     // stMaxSize is the ISP input (sensor) resolution; stSize is the scaled
     // output. The rkisp main-path scaler downscales 3072x1728 -> 1920x1080.
@@ -264,19 +264,64 @@ static int venc_init(void) {
     return 0;
 }
 
+// Diagnostic: dump raw NV12 frames straight off the VI channel, bypassing
+// VENC entirely. Isolates ISP-stage artifacts (scaler/demosaic) from encoder
+// artifacts. View with e.g. ffplay -f rawvideo -pix_fmt nv12 -video_size WxH
+// using the stride (VirWidth x VirHeight) printed per frame.
+static int vi_dump_raw(const char *path, RK_S32 nframes) {
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        printf("ERROR: cannot open %s\n", path);
+        return -1;
+    }
+    VIDEO_FRAME_INFO_S vframe;
+    RK_S32 got = 0;
+    // Discard ~2s of frames so AF/AE converge before we keep one; the first
+    // frames are always soft/mis-exposed and useless for judging detail.
+    RK_S32 warmup = 60;
+    while (!g_quit && warmup > 0) {
+        if (RK_MPI_VI_GetChnFrame(0, CAM_ID, &vframe, 1000) != RK_SUCCESS)
+            continue;
+        RK_MPI_VI_ReleaseChnFrame(0, CAM_ID, &vframe);
+        warmup--;
+    }
+    while (!g_quit && (nframes < 0 || got < nframes)) {
+        if (RK_MPI_VI_GetChnFrame(0, CAM_ID, &vframe, 1000) != RK_SUCCESS)
+            continue;
+        void *data = RK_MPI_MB_Handle2VirAddr(vframe.stVFrame.pMbBlk);
+        RK_U32 w = vframe.stVFrame.u32Width;
+        RK_U32 h = vframe.stVFrame.u32Height;
+        RK_U32 vw = vframe.stVFrame.u32VirWidth;
+        RK_U32 vh = vframe.stVFrame.u32VirHeight;
+        size_t sz = (size_t)vw * vh * 3 / 2; // NV12 incl. stride padding
+        fwrite(data, 1, sz, fp);
+        printf("raw frame %d: %ux%u (stride %ux%u) NV12 %zu bytes\n",
+               got, w, h, vw, vh, sz);
+        RK_MPI_VI_ReleaseChnFrame(0, CAM_ID, &vframe);
+        got++;
+    }
+    fclose(fp);
+    printf("dumped %d NV12 frame(s) to %s\n", got, path);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     const char *out_path = DEFAULT_OUT_PATH;
+    const char *raw_path = NULL;
     RK_S32 frame_cnt = -1; // -1 = until SIGINT
     int ret = -1;
     int c;
 
-    while ((c = getopt(argc, argv, "l:o:m::g:qvh")) != -1) {
+    while ((c = getopt(argc, argv, "l:o:r:m::g:qvh")) != -1) {
         switch (c) {
         case 'l':
             frame_cnt = atoi(optarg);
             break;
         case 'o':
             out_path = optarg;
+            break;
+        case 'r':
+            raw_path = optarg;
             break;
         case 'm':
             g_manual_ae = true;
@@ -294,9 +339,10 @@ int main(int argc, char *argv[]) {
             break;
         case 'h':
         default:
-            printf("usage: %s [-l frames] [-o out.h265] [-m[time]] [-g gain] [-q|-v]\n", argv[0]);
+            printf("usage: %s [-l frames] [-o out.h265] [-r raw.nv12] [-m[time]] [-g gain] [-q|-v]\n", argv[0]);
             printf("  -l  number of frames to capture (default: until Ctrl-C)\n");
             printf("  -o  output raw HEVC path (default: %s)\n", DEFAULT_OUT_PATH);
+            printf("  -r  dump raw NV12 from VI (bypass VENC) to path, then exit\n");
             printf("  -m  manual AE with optional exposure time in seconds (default: %.4f)\n", g_manual_time);
             printf("  -g  manual AE gain (default: %.1f)\n", g_manual_gain);
             printf("  -q  quiet: only errors and summary\n");
@@ -311,10 +357,13 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, sigterm_handler);
     signal(SIGTERM, sigterm_handler);
 
-    FILE *fp = fopen(out_path, "wb");
-    if (!fp) {
-        printf("ERROR: cannot open %s\n", out_path);
-        return -1;
+    FILE *fp = NULL;
+    if (!raw_path) {
+        fp = fopen(out_path, "wb");
+        if (!fp) {
+            printf("ERROR: cannot open %s\n", out_path);
+            return -1;
+        }
     }
 
     if (isp_start() != 0)
@@ -327,6 +376,13 @@ int main(int argc, char *argv[]) {
 
     if (vi_dev_init() != 0 || vi_chn_init() != 0)
         goto cleanup_sys;
+
+    if (raw_path) {
+        vi_dump_raw(raw_path, frame_cnt < 0 ? 1 : frame_cnt);
+        ret = 0;
+        goto cleanup_vi;
+    }
+
     if (venc_init() != 0)
         goto cleanup_vi;
 
@@ -411,7 +467,8 @@ cleanup_sys:
 cleanup_isp:
     isp_stop();
 cleanup_file:
-    fclose(fp);
-    printf("UVR capture exit: %d (%s)\n", ret, out_path);
+    if (fp)
+        fclose(fp);
+    printf("UVR capture exit: %d (%s)\n", ret, raw_path ? raw_path : out_path);
     return ret;
 }

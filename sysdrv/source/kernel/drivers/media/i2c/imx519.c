@@ -39,12 +39,21 @@
 #endif
 
 /*
- * Per-lane MIPI DDR clock produced by the PLL block in the mode register
- * tables (0x0305-0x030f).  This matches the Raspberry Pi reference driver,
- * which advertises 408 MHz for this exact PLL configuration.  pixel_rate is
- * derived from this and the active lane count (see imx519_set_fmt).
+ * Per-lane MIPI DDR clock produced by the OP PLL block in the mode register
+ * tables (0x030d-0x030f).  This matches the MTK 4-lane reference driver
+ * (mtk_imx519mipiraw_Sensor.c): 0x0820/0x0821 = 0x14c0 = 5312 Mbps total
+ * over 4 lanes = 1328 Mbps/lane = 664 MHz DDR clock.  Used only for the
+ * CSI D-PHY timing (link_freq control); it is NOT the pixel rate.
  */
-#define IMX519_LINK_FREQ_408M               408000000
+#define IMX519_LINK_FREQ_664M               664000000
+
+/* The sensor's internal pixel clock is fixed by the VT PLL registers and is
+ * independent of the number of MIPI lanes.  This value matches the MTK
+ * 4-lane reference driver (.pclk = 1388000000) whose VT PLL block we use,
+ * and yields the 30fps readout with the mode's line_length (12800) and
+ * frame_length (3614): 1388e6 / (12800 * 3614) = 30.0 fps.  Do NOT derive
+ * it from link_freq. */
+#define IMX519_PIXEL_RATE                   1388000000
 
 #define IMX519_XVCLK_FREQ_24M               24000000
 
@@ -171,7 +180,7 @@ static const struct regval imx519_mode_common_regs[] = {
     {0x0136, 0x18},
     {0x0137, 0x00},
     {0x3c7e, 0x01},
-    {0x3c7f, 0x07},
+    {0x3c7f, 0x0c},  /* MTK init value (RPi 2-lane uses 0x07) */
     {0x3020, 0x00},
     {0x3e35, 0x01},
     {0x3f7f, 0x01},
@@ -396,7 +405,11 @@ static const struct regval imx519_mode_common_regs[] = {
     {0x8c1f, 0x00},
     {0x8c27, 0x00},
     {0x8c3b, 0x03},
-    {0x9004, 0x0b},
+    /* PDAF pixel correction pointer table: the RPi 2-lane driver programs
+     * only 0x9004=0x0b with entries up to 0x9217; the known-good MTK 4-lane
+     * driver programs 0x9004=0x1a and extends the table through 0x9235
+     * (pointers into the 0x63xx/0x93xx correction register banks). */
+    {0x9004, 0x1a},
     {0x920c, 0x6a},
     {0x920d, 0x22},
     {0x920e, 0x6a},
@@ -405,6 +418,36 @@ static const struct regval imx519_mode_common_regs[] = {
     {0x9215, 0x20},
     {0x9216, 0x6a},
     {0x9217, 0x21},
+    {0x9218, 0x63},
+    {0x9219, 0x38},
+    {0x921a, 0x63},
+    {0x921b, 0x39},
+    {0x921c, 0x63},
+    {0x921d, 0x3a},
+    {0x921e, 0x63},
+    {0x921f, 0x3b},
+    {0x9220, 0x63},
+    {0x9221, 0x3e},
+    {0x9222, 0x63},
+    {0x9223, 0x68},
+    {0x9224, 0x63},
+    {0x9225, 0x69},
+    {0x9226, 0x63},
+    {0x9227, 0x6a},
+    {0x9228, 0x63},
+    {0x9229, 0x6b},
+    {0x922a, 0x93},
+    {0x922b, 0x95},
+    {0x922c, 0x93},
+    {0x922d, 0x97},
+    {0x922e, 0x93},
+    {0x922f, 0x99},
+    {0x9230, 0x93},
+    {0x9231, 0xc5},
+    {0x9232, 0x93},
+    {0x9233, 0xc7},
+    {0x9234, 0x93},
+    {0x9235, 0xc9},
     {0x9385, 0x3e},
     {0x9387, 0x1b},
     {0x938d, 0x4d},
@@ -450,33 +493,46 @@ static const struct regval imx519_mode_common_regs[] = {
  * each output pixel is a real photosite; the RV1106 ISP (max input 3072x1728)
  * then downscales 3072x1728 -> 1920x1080 (1.6:1 supersample).  Crop window:
  *   x: 792..3863  (0x0344=0x0318, 0x0348=0x0f17)  -> 3072 wide
- *   y: 884..2611  (0x0346=0x0374, 0x034a=0x0a33)  -> 1728 tall
+ *   y: 880..2607  (0x0346=0x0370, 0x034a=0x0a2f)  -> 1728 tall
+ *
+ * IMPORTANT: y_start MUST be a multiple of 16.  The sensor's PDAF pixels
+ * repeat on a 16-row grid and the on-chip PD-pixel correction assumes the
+ * crop is aligned to it.  With y_start=884 (the geometric center, %16=4)
+ * the corrector interpolated the wrong positions, producing segment/dash
+ * artifacts with ringing on every 8th row (and neighbours) near edges -
+ * the "staircase" artifact - while leaving the real PD pixels uncorrected
+ * (+30% hot dots on a 16x16 grid).  Verified on hardware 2026-07-05.
+ * x_start phase (792, %16=8) matches the RPi reference crops and is fine.
  * Differences from the RPi 2-lane table:
  *   - 0x0114 = 0x03         : 4 CSI data lanes (was 0x01)
  *   - recropped to 3072x1728 from the RPi 3840x2160 no-bin template.
- * The PLL block (0x0305-0x030f) and the per-lane MIPI rate (0x0820/0x0821)
- * are left exactly as the RPi table, i.e. 408 MHz per lane.
+ * The PLL block (0x0303-0x030f), MIPI rate (0x0820/0x0821 = 5312 Mbps total,
+ * 1328 Mbps/lane = 664 MHz link freq) and 0x3c06/0x3c07 are taken from the
+ * MTK 4-lane reference driver capture mode (the only known-good 4-lane
+ * config; pclk = 1388 MHz).  Both known-good no-bin references (RPi and MTK)
+ * use exactly 12800 clocks per line - shorter lines were verified on
+ * hardware to cause column gain striping.
  *
- * With line_length 6512 (0x1970) and frame_length 2184 (0x0888) the readout
- * runs at 426.67M / (6512 * 2184) = 30 fps.
+ * With line_length 12800 (0x3200) and frame_length 3614 (0x0e1e) the readout
+ * runs at 1388M / (12800 * 3614) = 30 fps.
  */
 static const struct regval imx519_linear_10bit_3072x1728_regs[] = {
     {0x0111, 0x02},
     {0x0112, 0x0a},
     {0x0113, 0x0a},
     {0x0114, 0x03},
-    {0x0342, 0x19},
-    {0x0343, 0x70},
-    {0x0340, 0x08},
-    {0x0341, 0x88},
+    {0x0342, 0x32},
+    {0x0343, 0x00},
+    {0x0340, 0x0e},
+    {0x0341, 0x1e},
     {0x0344, 0x03},
     {0x0345, 0x18},
     {0x0346, 0x03},
-    {0x0347, 0x74},
+    {0x0347, 0x70},
     {0x0348, 0x0f},
     {0x0349, 0x17},
     {0x034a, 0x0a},
-    {0x034b, 0x33},
+    {0x034b, 0x2f},
     {0x0220, 0x00},
     {0x0221, 0x11},
     {0x0222, 0x01},
@@ -502,44 +558,51 @@ static const struct regval imx519_linear_10bit_3072x1728_regs[] = {
     {0x034e, 0x06},
     {0x034f, 0xc0},
     {0x0301, 0x06},
-    {0x0303, 0x04},
-    {0x0305, 0x06},
+    {0x0303, 0x02},
+    {0x0305, 0x04},
     {0x0306, 0x01},
-    {0x0307, 0x40},
+    {0x0307, 0x5b},
     {0x0309, 0x0a},
-    {0x030b, 0x02},
-    {0x030d, 0x04},
-    {0x030e, 0x01},
-    {0x030f, 0x10},
+    {0x030b, 0x01},
+    {0x030d, 0x03},
+    {0x030e, 0x00},
+    {0x030f, 0xa6},
     {0x0310, 0x01},
-    {0x0820, 0x0a},
-    {0x0821, 0x20},
+    {0x0820, 0x14},
+    {0x0821, 0xc0},
     {0x0822, 0x00},
     {0x0823, 0x00},
     {0x3e20, 0x01},
     {0x3e37, 0x01},
     {0x3e3b, 0x00},
+    {0x38a3, 0x00},
     {0x38a4, 0x00},
     {0x38a5, 0x00},
     {0x38a6, 0x00},
     {0x38a7, 0x00},
+    /* internal calib window = out_width/16 x out_height/12 (holds across all
+     * five RPi reference modes); 3072/16=192=0xc0, 1728/12=144=0x90 */
     {0x38a8, 0x00},
-    {0x38a9, 0xf0},
+    {0x38a9, 0xc0},
     {0x38aa, 0x00},
-    {0x38ab, 0xb4},
+    {0x38ab, 0x90},
     {0x0106, 0x00},
     {0x0b00, 0x00},
     {0x3230, 0x00},
+    /* NOTE: MTK capture mode uses 0x3f14=0x00/0x3f3c=0x03 here, but those
+     * values alone black out the readout (verified on hardware); they appear
+     * to require the rest of the MTK capture config (0x0220=?).  Keep the
+     * RPi values, which work. */
     {0x3f14, 0x01},
     {0x3f3c, 0x01},
     {0x3f0d, 0x0a},
     {0x3fbc, 0x00},
-    {0x3c06, 0x00},
-    {0x3c07, 0x48},
+    {0x3c06, 0x01},
+    {0x3c07, 0x88},
     {0x3c0a, 0x00},
     {0x3c0b, 0x00},
-    {0x3f78, 0x00},
-    {0x3f79, 0x40},
+    {0x3f78, 0x01},
+    {0x3f79, 0x90},
     {0x3f7c, 0x00},
     {0x3f7d, 0x00},
     {REG_NULL, 0x00},
@@ -555,8 +618,8 @@ static const struct imx519_mode supported_modes[] = {
             .denominator = 300000,
         },
         .exp_def = IMX519_EXPOSURE_DEFAULT,
-        .hts_def = 0x1970,
-        .vts_def = 0x0888,
+        .hts_def = 0x3200,
+        .vts_def = 0x0e1e,
         .global_reg_list = imx519_mode_common_regs,
         .reg_list = imx519_linear_10bit_3072x1728_regs,
         .hdr_mode = NO_HDR,
@@ -568,7 +631,7 @@ static const struct imx519_mode supported_modes[] = {
 };
 
 static const s64 link_freq_items[] = {
-    IMX519_LINK_FREQ_408M,
+    IMX519_LINK_FREQ_664M,
 };
 
 static const char * const imx519_test_pattern_menu[] = {
@@ -714,8 +777,6 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
     struct imx519 *imx519 = to_imx519(sd);
     const struct imx519_mode *mode;
     s64 h_blank, vblank_def;
-    u32 lane_num = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
-    u64 pixel_rate;
 
     mutex_lock(&imx519->mutex);
 
@@ -742,9 +803,7 @@ static int imx519_set_fmt(struct v4l2_subdev *sd,
                      1, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->vblank, vblank_def);
         __v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
-        pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
-                 mode->bpp * 2 * lane_num;
-        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, pixel_rate);
+        __v4l2_ctrl_s_ctrl_int64(imx519->pixel_rate, IMX519_PIXEL_RATE);
     }
 
     mutex_unlock(&imx519->mutex);
@@ -1311,8 +1370,6 @@ static int imx519_initialize_controls(struct imx519 *imx519)
     struct v4l2_ctrl_handler *handler;
     s64 exposure_max, vblank_def;
     u32 h_blank;
-    u32 lane_num = imx519->bus_cfg.bus.mipi_csi2.num_data_lanes;
-    u64 pixel_rate;
     int ret;
 
     handler = &imx519->ctrl_handler;
@@ -1328,10 +1385,8 @@ static int imx519_initialize_controls(struct imx519 *imx519)
                 link_freq_items);
     v4l2_ctrl_s_ctrl(imx519->link_freq, mode->mipi_freq_idx);
 
-    pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
-             mode->bpp * 2 * lane_num;
     imx519->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
-        V4L2_CID_PIXEL_RATE, 0, pixel_rate, 1, pixel_rate);
+        V4L2_CID_PIXEL_RATE, 0, IMX519_PIXEL_RATE, 1, IMX519_PIXEL_RATE);
 
     h_blank = mode->hts_def - mode->width;
     imx519->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,
