@@ -183,8 +183,8 @@ static int vi_chn_init(void) {
     memset(&attr, 0, sizeof(attr));
     attr.stIspOpt.u32BufCount = VI_BUF_COUNT;
     attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
-    attr.stSize.u32Width = ISP_IN_WIDTH;
-    attr.stSize.u32Height = ISP_IN_HEIGHT;
+    attr.stSize.u32Width = VI_WIDTH;
+    attr.stSize.u32Height = VI_HEIGHT;
     attr.enPixelFormat = RK_FMT_YUV420SP;
     // stMaxSize is the ISP input (sensor) resolution; stSize is the scaled
     // output. The rkisp main-path scaler downscales 3072x1728 -> 1920x1080.

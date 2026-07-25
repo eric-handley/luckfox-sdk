@@ -73,6 +73,11 @@
     status = "disabled";
 };
 
+&uart0 {
+    pinctrl-0 = <&uart0m0_xfer>;
+    status = "okay";
+};
+
 &uart2 {
     status = "okay";
 };

@@ -1,0 +1,1 @@
+../project/cfg/BoardConfig_IPC/overlay/overlay-luckfox-buildroot-init/usr/bin/uvr_supervisor.py

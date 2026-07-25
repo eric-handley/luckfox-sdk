@@ -22,16 +22,7 @@ vicap board="172.32.0.1" dest="/oem/usr/bin/":
     set -euo pipefail
     rm -f media/samples/simple_test/uvr-vicap
     just docker-run "make -C media/samples/simple_test uvr-vicap RK_MEDIA_CROSS=arm-rockchip830-linux-uclibcgnueabihf RK_CHIP=rv1106"
-    bin=media/samples/simple_test/uvr-vicap
-    want=$(md5sum "$bin" | cut -d' ' -f1)
-    scp "$bin" root@{{board}}:{{dest}}/uvr-vicap
-    # flush to the SD card, then verify the on-disk copy matches the host build
-    got=$(ssh root@{{board}} "sync && md5sum {{dest}}/uvr-vicap" | cut -d' ' -f1)
-    if [ "$want" != "$got" ]; then
-        echo "ERROR: checksum mismatch (host $want != board $got) - transfer corrupt" >&2
-        exit 1
-    fi
-    echo "uvr-vicap copied and verified ($want) at {{dest}}/uvr-vicap"
+    just push media/samples/simple_test/uvr-vicap {{dest}}/uvr-vicap {{board}}
 
 flash device="/dev/mmcblk0":
     #!/usr/bin/env bash
@@ -68,9 +59,39 @@ clean:
 pull filepath:
     scp root@172.32.0.1:{{filepath}} .
 
+# Copy a file to the board, flush it to the SD card and verify the on-disk copy
+# matches the host. These writes silently truncate often enough to be worth checking.
+push src dst board="172.32.0.1":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scp "{{src}}" root@{{board}}:"{{dst}}"
+    want=$(md5sum "{{src}}" | cut -d' ' -f1)
+    got=$(ssh root@{{board}} "sync && md5sum '{{dst}}'" | cut -d' ' -f1)
+    if [ "$want" != "$got" ]; then
+        echo "ERROR: checksum mismatch for {{dst}} (host $want != board $got) - transfer corrupt" >&2
+        exit 1
+    fi
+    echo "pushed {{src}} -> {{dst}} ($want)"
+
+# Copy the SoC supervisor to the board, restart it and show any startup errors
+supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ssh root@{{board}} "/etc/init.d/S99uvr stop"
+    just push symlinks/uvr_supervisor.py {{dest}} {{board}}
+    just push symlinks/S99uvr /etc/init.d/S99uvr {{board}}
+    ssh root@{{board}} "$(printf '%s\n' \
+        'chmod +x /etc/init.d/S99uvr' \
+        ': > /data/uvr-supervisor.log' \
+        '/etc/init.d/S99uvr start' \
+        'sleep 3' \
+        'pidof python3 >/dev/null && echo SUPERVISOR_RUNNING || echo SUPERVISOR_DOWN' \
+        'echo "--- /data/uvr-supervisor.log ---"' \
+        'cat /data/uvr-supervisor.log')"
+
 copy-iq board="172.32.0.1":
-    scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/etc/iqfiles/imx519_arducam-imx519_default.json
-    scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/oem/usr/share/iqfiles/imx519_arducam-imx519_default.json
+    just push symlinks/imx519_arducam-imx519_default.json /etc/iqfiles/imx519_arducam-imx519_default.json {{board}}
+    just push symlinks/imx519_arducam-imx519_default.json /oem/usr/share/iqfiles/imx519_arducam-imx519_default.json {{board}}
 
 # Web UI to edit the IQ JSON and deploy it to the board (scp + restart streamer)
 tuner board="172.32.0.1" port="8099":
@@ -82,8 +103,7 @@ deploy board="172.32.0.1" deploy="true":
     streamer="simple_vi_bind_venc_rtsp -I 0 -w 1920 -h 1080 -e h265"
     proc="simple_vi_bind_venc_rtsp"
     if [ "{{deploy}}" = "true" ]; then
-        scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/etc/iqfiles/imx519_arducam-imx519_default.json
-        scp symlinks/imx519_arducam-imx519_default.json root@{{board}}:/oem/usr/share/iqfiles/imx519_arducam-imx519_default.json
+        just copy-iq {{board}}
     else
         echo "deploy=false: skipping IQ JSON copy"
     fi
