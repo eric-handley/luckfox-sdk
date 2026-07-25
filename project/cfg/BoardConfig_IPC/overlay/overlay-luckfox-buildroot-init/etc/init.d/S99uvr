@@ -5,7 +5,9 @@
 
 SUPERVISOR=/usr/bin/uvr_supervisor.py
 PIDFILE=/var/run/uvr_supervisor.pid
-LOG=/data/uvr-supervisor.log
+# Only covers startup: the supervisor redirects its own stderr into the run
+# directory as soon as it has created one.
+LOG=/tmp/supervisor-startup.log
 
 [ -f "$SUPERVISOR" ] || exit 0
 

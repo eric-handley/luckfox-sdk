@@ -82,12 +82,13 @@ supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
     just push symlinks/S99uvr /etc/init.d/S99uvr {{board}}
     ssh root@{{board}} "$(printf '%s\n' \
         'chmod +x /etc/init.d/S99uvr' \
-        ': > /data/uvr-supervisor.log' \
         '/etc/init.d/S99uvr start' \
         'sleep 3' \
         'pidof python3 >/dev/null && echo SUPERVISOR_RUNNING || echo SUPERVISOR_DOWN' \
-        'echo "--- /data/uvr-supervisor.log ---"' \
-        'cat /data/uvr-supervisor.log')"
+        'echo "--- /tmp/supervisor-startup.log ---"' \
+        'cat /tmp/supervisor-startup.log 2>/dev/null' \
+        'echo "--- /data/latest/supervisor.log ---"' \
+        'cat /data/latest/supervisor.log 2>/dev/null')"
 
 copy-iq board="172.32.0.1":
     just push symlinks/imx519_arducam-imx519_default.json /etc/iqfiles/imx519_arducam-imx519_default.json {{board}}

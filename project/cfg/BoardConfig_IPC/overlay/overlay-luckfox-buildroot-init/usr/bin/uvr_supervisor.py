@@ -72,6 +72,30 @@ def run_guarded(target, args):
         log("%s thread died:\n%s" % (target.__name__, traceback.format_exc()))
 
 
+def retry_name(name, attempt):
+    """video.h265 on the first attempt, video.1.h265 on the next, and so on."""
+    if attempt == 0:
+        return name
+    stem, ext = os.path.splitext(name)
+    return "%s.%d%s" % (stem, attempt, ext)
+
+
+def make_run_dir():
+    """Create this run's output directory and point DATA_DIR/latest at it."""
+    name = "%s_%s" % (uuid.uuid4().hex[:12], datetime.now().strftime("%Y%m%dT%H%M%S"))
+    path = os.path.join(DATA_DIR, name)
+    os.makedirs(path, exist_ok=True)
+
+    # Symlink last, via a rename, so `latest` is never left dangling.
+    link, tmp = os.path.join(DATA_DIR, "latest"), os.path.join(DATA_DIR, "latest.new")
+    try:
+        os.symlink(name, tmp)
+        os.replace(tmp, link)
+    except OSError as e:
+        log("could not update %s (%s)" % (link, e))
+    return path
+
+
 def open_output(path, preamble=b""):
     """Create a session output file, returning None if it can't be written.
 
@@ -221,17 +245,15 @@ class Supervisor:
                 log("heartbeat write failed: %s" % e)
             self.stop.wait(HEARTBEAT_INTERVAL_S)
 
-    # --- recording sessions ------------------------------------------------
-    def run_session(self):
-        # base = "%s_%s" % (uuid.uuid4().hex[:12], datetime.now().strftime("%Y%m%dT%H%M%S"))
-        # temp: use constant name as base to make it easier to copy test files to host device
-        base = "test"
-        video = os.path.join(DATA_DIR, base + ".h265")
-        csv_path = os.path.join(DATA_DIR, base + ".csv")
-        klog_path = os.path.join(DATA_DIR, base + ".klog")
+    # --- recording ----------------------------------------------------------
+    def record(self, run_dir, attempt):
+        def out(name):
+            return os.path.join(run_dir, retry_name(name, attempt))
 
-        csv_fd = open_output(csv_path, (CSV_HEADER + "\n").encode("ascii"))
-        klog_fd = open_output(klog_path, self.boot_log)
+        video = out("video.h265")
+
+        csv_fd = open_output(out("imu.csv"), (CSV_HEADER + "\n").encode("ascii"))
+        klog_fd = open_output(out("kernel.log"), self.boot_log)
         with self.lock:
             self.csv = csv_fd
             self.klog = klog_fd
@@ -240,18 +262,22 @@ class Supervisor:
         self.state = SOC_RECORDING
 
         argv = [VICAP_BIN, "-o", video, "-l", str(VICAP_FRAMES), *VICAP_EXTRA_ARGS]
-        log("starting session %s: %s" % (base, " ".join(argv)))
+        log("starting capture: %s" % " ".join(argv))
 
-        log_fd = os.open(VICAP_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        vicap_log_fd = open_output(out("vicap.log"))
         try:
-            proc = subprocess.Popen(argv, stdout=log_fd, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(
+                argv,
+                stdout=vicap_log_fd if vicap_log_fd is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT)
             log("vicap running as pid %d" % proc.pid)
             rc = self.wait_for(proc, video)
         except OSError as e:
             log("failed to launch %s: %s" % (VICAP_BIN, e))
             rc = -1
         finally:
-            os.close(log_fd)
+            if vicap_log_fd is not None:
+                os.close(vicap_log_fd)
 
         with self.lock:
             self.csv = None
@@ -259,8 +285,7 @@ class Supervisor:
         for f in (csv_fd, klog_fd):
             if f is not None:
                 os.close(f)
-        log("session %s ended: rc=%s, %d imu rows (vicap output in %s)"
-            % (base, rc, self.row_count, VICAP_LOG))
+        log("capture ended: rc=%s, %d imu rows" % (rc, self.row_count))
         return rc
 
     def wait_for(self, proc, video):
@@ -291,8 +316,16 @@ class Supervisor:
 
     # --- main --------------------------------------------------------------
     def run(self):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        log("supervisor starting (port=%s, data=%s)" % (SERIAL_PORT, DATA_DIR))
+        run_dir = make_run_dir()
+
+        # Everything log() writes goes to stderr, so redirecting it here also
+        # captures any traceback python prints on the way out.
+        slog = open_output(os.path.join(run_dir, "supervisor.log"))
+        if slog is not None:
+            os.dup2(slog, 2)
+            os.close(slog)
+
+        log("supervisor starting (port=%s, output=%s)" % (SERIAL_PORT, run_dir))
         fd = open_serial(SERIAL_PORT)
 
         for handler in (signal.SIGTERM, signal.SIGINT):
@@ -314,13 +347,14 @@ class Supervisor:
         for target, args in threads:
             threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
 
+        attempt = 0
         while not self.stop.is_set():
             try:
-                rc = self.run_session()
+                rc = self.record(run_dir, attempt)
             except Exception:
                 # Never let an unexpected failure take the supervisor down: the
                 # stm32 would just see the heartbeat stop with no explanation.
-                log("session raised, treating as an error:\n" + traceback.format_exc())
+                log("recording raised, treating as an error:\n" + traceback.format_exc())
                 rc = -1
             if self.stop.is_set():
                 break
@@ -329,7 +363,8 @@ class Supervisor:
                 log("recording finished cleanly, state=STOPPED")
                 break
             self.state = SOC_ERROR
-            log("state=ERROR, retrying in %.1fs" % RESTART_DELAY_S)
+            attempt += 1
+            log("state=ERROR, retrying in %.1fs (attempt %d)" % (RESTART_DELAY_S, attempt))
             time.sleep(RESTART_DELAY_S)
 
         # Recording finished cleanly: keep heart-beating STOPPED (and draining the
