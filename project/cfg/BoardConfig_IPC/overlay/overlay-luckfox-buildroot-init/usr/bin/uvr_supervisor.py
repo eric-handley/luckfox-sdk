@@ -33,7 +33,7 @@ KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
 VICAP_FRAMES         = 1800                          # -l: frames per recording
-VICAP_EXTRA_ARGS     = ["-q"]
+VICAP_EXTRA_ARGS     = ["-v"]
 VICAP_LOG            = "/data/uvr-vicap.log"
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period

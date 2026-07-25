@@ -56,8 +56,9 @@ clean:
     @if [ -f sysdrv/source/uboot/u-boot/.config ]; then make -C sysdrv/source/uboot/u-boot distclean 2>/dev/null || true; fi
     @echo "Cleaned all build directories"
 
+# -r so a run directory (or /data/latest, which is a symlink to one) works too
 pull filepath:
-    scp root@172.32.0.1:{{filepath}} .
+    scp -r root@172.32.0.1:{{filepath}} .
 
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy
 # matches the host. These writes silently truncate often enough to be worth checking.

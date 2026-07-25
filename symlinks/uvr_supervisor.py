@@ -46,7 +46,7 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_FRAMES         = 1800                          # -l: frames per recording
+VICAP_FRAMES         = 900                          # -l: frames per recording
 VICAP_EXTRA_ARGS     = ["-q"]
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period
@@ -63,12 +63,18 @@ SOC_STOPPED   = 3
 SOC_ERROR     = 4
 SOC_COMPLETE  = 5   # last byte we ever send; the stm32 cuts our power on it
 
-# IMU wire format: sync byte 0xAA followed by a packed imu_data_t
+# IMU wire format: sync byte 0xAA, a soc_mode_t byte, then a packed imu_data_t
 # (accel[3], gyro[3], temp), all little-endian floats.
 IMU_SOF   = b"\xaa"
 IMU_FMT   = "<7f"
 IMU_LEN   = struct.calcsize(IMU_FMT)
-FRAME_LEN = 1 + IMU_LEN
+FRAME_LEN = 2 + IMU_LEN
+
+# What the stm32 wants us doing, from the first frame we receive. If no frame
+# ever arrives we record, so a dead uart never costs us a recording.
+SOC_MODE_RECORD = 1
+SOC_MODE_IDLE   = 2
+MODE_WAIT_S     = 5.0
 
 CSV_HEADER = ("timestamp,accel_x_g,accel_y_g,accel_z_g,"
               "gyro_x_dps,gyro_y_dps,gyro_z_dps,imu_temp_c,soc_temp_c")
@@ -76,6 +82,13 @@ CSV_HEADER = ("timestamp,accel_x_g,accel_y_g,accel_z_g,"
 
 def log(msg):
     os.write(2, ("[%s] %s\n" % (datetime.now().isoformat(), msg)).encode("ascii", "replace"))
+    # Log lines are rare, so flushing every one costs nothing and means a power
+    # cut can't take the explanation of what went wrong with it. Fails harmlessly
+    # while stderr is still the init script's pipe.
+    try:
+        os.fsync(2)
+    except OSError:
+        pass
 
 
 def run_guarded(target, args):
@@ -120,6 +133,7 @@ def open_output(path, preamble=b""):
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         os.write(fd, preamble)
+        os.fsync(fd)
         return fd
     except OSError as e:
         log("cannot write %s (%s), continuing without it" % (path, e))
@@ -137,6 +151,8 @@ class Supervisor:
         self.soc_temp = float("nan")
         self.row_count = 0
         self.temp_warned = False
+        self.got_frame = threading.Event()
+        self.mode = SOC_MODE_RECORD
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -204,11 +220,14 @@ class Supervisor:
                     del buf[:i]
                 if len(buf) < FRAME_LEN:
                     break
-                vals = struct.unpack(IMU_FMT, bytes(buf[1:FRAME_LEN]))
+                vals = struct.unpack(IMU_FMT, bytes(buf[2:FRAME_LEN]))
                 if not all(math.isfinite(v) for v in vals):
                     # False sync byte inside float data: drop it and keep scanning.
                     del buf[0]
                     continue
+                if not self.got_frame.is_set():
+                    self.mode = buf[1]
+                    self.got_frame.set()
                 del buf[:FRAME_LEN]
                 self.on_imu(vals)
 
@@ -245,6 +264,7 @@ class Supervisor:
                 if self.klog is not None:
                     try:
                         os.write(self.klog, rec)
+                        os.fsync(self.klog)
                     except OSError as e:
                         log("klog write failed (%s), abandoning kernel log" % e)
                         self.klog = None
@@ -330,16 +350,7 @@ class Supervisor:
 
     # --- main --------------------------------------------------------------
     def run(self):
-        run_dir = make_run_dir()
-
-        # Everything log() writes goes to stderr, so redirecting it here also
-        # captures any traceback python prints on the way out.
-        slog = open_output(os.path.join(run_dir, "supervisor.log"))
-        if slog is not None:
-            os.dup2(slog, 2)
-            os.close(slog)
-
-        log("supervisor starting (port=%s, output=%s)" % (SERIAL_PORT, run_dir))
+        log("supervisor starting (port=%s)" % SERIAL_PORT)
         fd = open_serial(SERIAL_PORT)
 
         for handler in (signal.SIGTERM, signal.SIGINT):
@@ -360,6 +371,27 @@ class Supervisor:
 
         for target, args in threads:
             threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
+
+        if not self.got_frame.wait(MODE_WAIT_S):
+            log("no imu frame after %.0fs, recording anyway" % MODE_WAIT_S)
+        elif self.mode == SOC_MODE_IDLE:
+            # Powered up only so the recordings can be pulled over USB. Nothing
+            # to supervise, so get out of the way; the stm32 knows not to expect
+            # a heartbeat in this mode.
+            return
+
+        # Only create a run directory once we know we are recording, so idle mode
+        # leaves DATA_DIR/latest pointing at the last real recording.
+        run_dir = make_run_dir()
+
+        # Everything log() writes goes to stderr, so redirecting it here also
+        # captures any traceback python prints on the way out. Startup lines up
+        # to this point stay in the init script's log.
+        slog = open_output(os.path.join(run_dir, "supervisor.log"))
+        if slog is not None:
+            os.dup2(slog, 2)
+            os.close(slog)
+        log("output=%s" % run_dir)
 
         rc = -1
         attempt = 0
