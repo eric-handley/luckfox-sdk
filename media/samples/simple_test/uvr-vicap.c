@@ -43,7 +43,7 @@
 #define VI_BUF_COUNT      3
 #define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
 #define VENC_GOP          60
-#define VENC_BITRATE_KB   (10 * 1024)       // 10 Mbps CBR
+#define VENC_BITRATE_KB   (6 * 1024)        // 6 Mbps CBR
 #define IQ_FILE_DIR       "/etc/iqfiles"
 #define DEFAULT_OUT_PATH  "/data/uvr_capture.h265"
 
@@ -364,6 +364,11 @@ int main(int argc, char *argv[]) {
             printf("ERROR: cannot open %s\n", out_path);
             return -1;
         }
+        // Batch into large sequential writes: gentler on the SD FTL than the
+        // default ~4KB dribble, and fewer write() syscalls on this single core.
+        // ~1.7s of footage rides in RAM, lost only on an unexpected power cut.
+        static char io_buf[2 * 1024 * 1024];
+        setvbuf(fp, io_buf, _IOFBF, sizeof(io_buf));
     }
 
     if (isp_start() != 0)

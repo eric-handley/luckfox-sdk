@@ -47,14 +47,15 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_FRAMES         = 300                          # -l: frames per recording
+VICAP_MINUTES        = 10
+VICAP_FRAMES         = VICAP_MINUTES * 60 * 30       # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period
 SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N IMU rows
 CSV_FLUSH_EVERY      = 100                           # flush CSV to disk every N rows
 RESTART_DELAY_S      = 2.0                           # pause before relaunch after error
-PROGRESS_EVERY_S     = 10                            # in-recording progress log period
+PROGRESS_EVERY_S     = 5                             # in-recording progress log period
 # ---------------------------------------------------------------------------
 
 # Heartbeat state values, mirroring soc_status_t in the stm32 uart_format.h.
@@ -167,6 +168,16 @@ def make_run_dir():
         fsync_dir(DATA_DIR)
     except OSError as e:
         log("could not update %s (%s)" % (link, e))
+
+    # Append to a growing index so the recording order is recoverable even when
+    # the clock is unset and the dir names don't sort chronologically.
+    try:
+        with open(os.path.join(DATA_DIR, "recordings.log"), "a") as f:
+            f.write(name + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        log("could not append to recordings.log (%s)" % e)
     return path
 
 
@@ -392,7 +403,7 @@ class Supervisor:
                 log("  %ds elapsed: %d imu rows, %.1f MB video, soc %.1fC, "
                     "load %s, mem %s MB free"
                     % (elapsed, self.row_count, size / 1e6, self.soc_temp,
-                       _fmt(load1(), "%.2f"), _fmt(mem_avail_mb(), "%.0f")))
+                       _fmt(load1(), "%.2f"), _fmt(mem_avail_mb(), "%.1f")))
             if self.stop.is_set():
                 log("shutdown requested, terminating vicap")
                 proc.terminate()
