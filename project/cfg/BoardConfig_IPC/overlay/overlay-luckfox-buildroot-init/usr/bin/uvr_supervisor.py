@@ -30,6 +30,7 @@ import os
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -46,8 +47,8 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_FRAMES         = 900                          # -l: frames per recording
-VICAP_EXTRA_ARGS     = ["-q"]
+VICAP_FRAMES         = 300                          # -l: frames per recording
+VICAP_EXTRA_ARGS     = [""]
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period
 SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N IMU rows
@@ -107,17 +108,33 @@ def retry_name(name, attempt):
     return "%s.%d%s" % (stem, attempt, ext)
 
 
+def fsync_dir(path):
+    """Persist a directory's entries. Without this a power cut orphans anything
+    created in it since the last commit, since fsync on a file does not flush
+    the parent directory that names it."""
+    try:
+        dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as e:
+        log("could not fsync dir %s (%s)" % (path, e))
+
+
 def make_run_dir():
     """Create this run's output directory and point DATA_DIR/latest at it."""
     name = "%s_%s" % (uuid.uuid4().hex[:12], datetime.now().strftime("%Y%m%dT%H%M%S"))
     path = os.path.join(DATA_DIR, name)
     os.makedirs(path, exist_ok=True)
+    fsync_dir(DATA_DIR)
 
     # Symlink last, via a rename, so `latest` is never left dangling.
     link, tmp = os.path.join(DATA_DIR, "latest"), os.path.join(DATA_DIR, "latest.new")
     try:
         os.symlink(name, tmp)
         os.replace(tmp, link)
+        fsync_dir(DATA_DIR)
     except OSError as e:
         log("could not update %s (%s)" % (link, e))
     return path
@@ -141,7 +158,8 @@ def open_output(path, preamble=b""):
 
 
 class Supervisor:
-    def __init__(self):
+    def __init__(self, force_record=False):
+        self.force_record = force_record
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.state = SOC_INIT
@@ -305,6 +323,9 @@ class Supervisor:
                 stdout=vicap_log_fd if vicap_log_fd is not None else subprocess.DEVNULL,
                 stderr=subprocess.STDOUT)
             log("vicap running as pid %d" % proc.pid)
+            # Persist all the run-dir entries (incl. video.h265, created by vicap)
+            # so a power cut mid-recording keeps the partial files, not orphans.
+            fsync_dir(run_dir)
             rc = self.wait_for(proc, video)
         except OSError as e:
             log("failed to launch %s: %s" % (VICAP_BIN, e))
@@ -372,13 +393,18 @@ class Supervisor:
         for target, args in threads:
             threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
 
-        if not self.got_frame.wait(MODE_WAIT_S):
+        if self.force_record:
+            log("--record: forcing record mode, ignoring stm32")
+        elif not self.got_frame.wait(MODE_WAIT_S):
             log("no imu frame after %.0fs, recording anyway" % MODE_WAIT_S)
         elif self.mode == SOC_MODE_IDLE:
             # Powered up only so the recordings can be pulled over USB. Nothing
             # to supervise, so get out of the way; the stm32 knows not to expect
             # a heartbeat in this mode.
+            log("stm32 mode=%d (idle), exiting without recording" % self.mode)
             return
+        else:
+            log("stm32 mode=%d (record)" % self.mode)
 
         # Only create a run directory once we know we are recording, so idle mode
         # leaves DATA_DIR/latest pointing at the last real recording.
@@ -417,18 +443,30 @@ class Supervisor:
         # port or the output files, then send the final state ourselves.
         self.stop.set()
         if rc == 0:
-            # COMPLETE makes the stm32 cut our power, so everything has to be on
-            # the card before we send it. Ordering this the other way round is
-            # how /data ends up needing an fsck.
-            log("syncing to disk")
-            os.sync()
-            self.state = SOC_COMPLETE
+            if self.force_record:
+                # Stay powered so an ssh session survives; leave /data mounted.
+                log("syncing to disk")
+                os.sync()
+                self.state = SOC_STOPPED
+            else:
+                # COMPLETE makes the stm32 cut our power, so leave /data cleanly
+                # unmounted first: sync, stop logging (our log fds live on /data
+                # and would block the umount), then umount. Fall back to a plain
+                # sync if something else is still holding /data.
+                log("syncing and unmounting /data before power-off")
+                os.sync()
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+                if subprocess.call(["umount", DATA_DIR]) != 0:
+                    os.sync()
+                self.state = SOC_COMPLETE
         try:
             os.write(fd, bytes([self.state]))
-        except OSError as e:
-            log("final state write failed: %s" % e)
+        except OSError:
+            pass
         os.close(fd)
-        log("supervisor exiting (state=%d)" % self.state)
 
 
 def open_serial(path):
@@ -446,4 +484,4 @@ def open_serial(path):
 
 
 if __name__ == "__main__":
-    Supervisor().run()
+    Supervisor(force_record="--record" in sys.argv[1:]).run()

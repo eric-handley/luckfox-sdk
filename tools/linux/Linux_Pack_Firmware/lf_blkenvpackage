@@ -292,6 +292,11 @@ def main() -> int:
         )
         in_path = img_overrides.get(name, os.path.join(images_dir, f"{name}.img"))
         if not os.path.exists(in_path):
+            if size is None:
+                # Growup ("-") partition: created and formatted at runtime, so it
+                # has no image to flash. Skip it rather than fail.
+                print(" (growup, skipped)")
+                continue
             print()
             print(f"ERROR: '{in_path}' not found")
             return -1
@@ -303,6 +308,8 @@ def main() -> int:
         if size is not None and size_ > size:
             print(f"ERROR: '{in_path}' is larger than declared size in .env.txt")
             return -1
+
+    plan = [p for p in plan if p.get("path")]
 
     if has_grow or trim:
         total_aligned = (

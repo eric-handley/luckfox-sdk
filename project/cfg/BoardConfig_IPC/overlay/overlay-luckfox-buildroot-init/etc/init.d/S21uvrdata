@@ -19,14 +19,24 @@ start() {
     mkdir -p "$MNT"
     rmdir /userdata 2>/dev/null
 
-    # mkfs.ext4 (never bare mke2fs, which makes journal-less ext2 here).
-    if [ "$(blkid -o value -s TYPE "$DEV" 2>/dev/null)" != "ext4" ]; then
-        echo "uvrdata: formatting $DEV as ext4"
-        mkfs.ext4 -F -L data "$DEV" && tune2fs -c 0 -i 0 "$DEV"
+    # Format only a blank device or the old journal-less ext2; a journaled ext4
+    # is left alone. busybox blkid reports no TYPE, so check for the journal
+    # directly with dumpe2fs. mkfs.ext4 (never bare mke2fs, which makes ext2).
+    if ! dumpe2fs -h "$DEV" 2>/dev/null | grep -q has_journal; then
+        echo "uvrdata: formatting $DEV as journaled ext4"
+        # lazy_itable_init/lazy_journal_init=0: write all inode-table and journal
+        # metadata now rather than from a background thread after mount, where a
+        # power cut leaves bitmaps/checksums inconsistent. mkfs already fills the
+        # whole growup partition, so no resize2fs is ever needed afterwards.
+        mkfs.ext4 -F -L data -E lazy_itable_init=0,lazy_journal_init=0 "$DEV" \
+            && tune2fs -c 0 -i 0 "$DEV"
+    else
+        # -f forces a full check: after a power cut the kernel replays the journal
+        # and marks the superblock clean, so a plain e2fsck skips it and leaves
+        # latent bitmap/checksum corruption in place to abort on the first write.
+        e2fsck -fy "$DEV"
     fi
 
-    e2fsck -y "$DEV"
-    resize2fs "$DEV"
     mount -t ext4 -o rw,errors=remount-ro "$DEV" "$MNT"
 }
 

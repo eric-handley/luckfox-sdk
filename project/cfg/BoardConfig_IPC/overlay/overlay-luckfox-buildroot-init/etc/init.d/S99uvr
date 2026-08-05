@@ -5,9 +5,9 @@
 
 SUPERVISOR=/usr/bin/uvr_supervisor.py
 PIDFILE=/var/run/uvr_supervisor.pid
-# Only covers startup: the supervisor redirects its own stderr into the run
-# directory as soon as it has created one.
-LOG=/tmp/supervisor-startup.log
+# Persistent, single growing log so failures survive the power cut/reboot.
+# Named distinctly from each run dir's own supervisor.log to avoid confusion.
+LOG=/data/startup.log
 
 [ -f "$SUPERVISOR" ] || exit 0
 
@@ -16,6 +16,9 @@ start() {
     # Not a login shell, so pull in RkEnv.sh for LD_LIBRARY_PATH; without it
     # uvr-vicap can't load librockit.so from /oem/usr/lib.
     . /etc/profile >/dev/null 2>&1 || true
+    {
+        echo "------------------------------------------------------------"
+    } >>"$LOG" 2>/dev/null
     python3 "$SUPERVISOR" >>"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     echo "OK"
