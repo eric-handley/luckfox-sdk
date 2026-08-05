@@ -43,7 +43,7 @@
 #define VI_BUF_COUNT      3
 #define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
 #define VENC_GOP          60
-#define VENC_BITRATE_KB   (6 * 1024)        // 6 Mbps CBR
+#define VENC_BITRATE_KB   (7 * 1024)        // n Mbps CBR
 #define IQ_FILE_DIR       "/etc/iqfiles"
 #define DEFAULT_OUT_PATH  "/data/uvr_capture.h265"
 
