@@ -282,7 +282,6 @@ class Supervisor:
                 if self.klog is not None:
                     try:
                         os.write(self.klog, rec)
-                        os.fsync(self.klog)
                     except OSError as e:
                         log("klog write failed (%s), abandoning kernel log" % e)
                         self.klog = None
@@ -290,11 +289,17 @@ class Supervisor:
 
     # --- heartbeat ---------------------------------------------------------
     def heartbeat_loop(self, fd):
+        # Warn once per failure episode: at 0.2s a dead port would otherwise spam
+        # the log and bury the first, real failure. Re-arm on the next success.
+        warned = False
         while not self.stop.is_set():
             try:
                 os.write(fd, bytes([self.state]))
+                warned = False
             except OSError as e:
-                log("heartbeat write failed: %s" % e)
+                if not warned:
+                    warned = True
+                    log("heartbeat write failed: %s (suppressing until it recovers)" % e)
             self.stop.wait(HEARTBEAT_INTERVAL_S)
 
     # --- recording ----------------------------------------------------------
@@ -425,10 +430,13 @@ class Supervisor:
             try:
                 rc = self.record(run_dir, attempt)
             except Exception:
-                # Never let an unexpected failure take the supervisor down: the
-                # stm32 would just see the heartbeat stop with no explanation.
-                log("recording raised, treating as an error:\n" + traceback.format_exc())
-                rc = -1
+                # This is our own bug (bad format string, TypeError, ...), not a
+                # vicap failure. Don't retry it forever into video.1, video.2, ...;
+                # surface it and stop. state=ERROR keeps the heartbeat meaningful
+                # so the stm32 still sees a reason rather than silence.
+                log("record() raised, aborting:\n" + traceback.format_exc())
+                self.state = SOC_ERROR
+                break
             if self.stop.is_set():
                 break
             if rc == 0:
