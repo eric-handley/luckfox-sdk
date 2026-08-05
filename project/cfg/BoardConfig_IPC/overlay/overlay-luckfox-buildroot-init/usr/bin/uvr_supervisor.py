@@ -64,18 +64,17 @@ SOC_STOPPED   = 3
 SOC_ERROR     = 4
 SOC_COMPLETE  = 5   # last byte we ever send; the stm32 cuts our power on it
 
-# IMU wire format: sync byte 0xAA, a soc_mode_t byte, then a packed imu_data_t
-# (accel[3], gyro[3], temp), all little-endian floats.
+# IMU wire format: sync byte 0xAA, then a packed imu_data_t (accel[3], gyro[3],
+# temp), all little-endian floats.
 IMU_SOF   = b"\xaa"
 IMU_FMT   = "<7f"
 IMU_LEN   = struct.calcsize(IMU_FMT)
-FRAME_LEN = 2 + IMU_LEN
+FRAME_LEN = 1 + IMU_LEN
 
-# What the stm32 wants us doing, from the first frame we receive. If no frame
-# ever arrives we record, so a dead uart never costs us a recording.
-SOC_MODE_RECORD = 1
-SOC_MODE_IDLE   = 2
-MODE_WAIT_S     = 5.0
+# The presence of the IMU stream is the record signal: if the stm32 is streaming
+# frames we record, if none arrive in this window we are idle (booted only for
+# servicing, e.g. USB pull) and exit without touching the camera.
+IMU_WAIT_S = 5.0
 
 CSV_HEADER = ("timestamp,accel_x_g,accel_y_g,accel_z_g,"
               "gyro_x_dps,gyro_y_dps,gyro_z_dps,imu_temp_c,soc_temp_c")
@@ -90,6 +89,37 @@ def log(msg):
         os.fsync(2)
     except OSError:
         pass
+
+
+def _read_first(path):
+    try:
+        with open(path) as f:
+            return f.readline()
+    except OSError:
+        return None
+
+
+def load1():
+    raw = _read_first("/proc/loadavg")
+    try:
+        return float(raw.split()[0])
+    except (AttributeError, ValueError):
+        return None
+
+
+def mem_avail_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024.0   # kB -> MB
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _fmt(v, spec):
+    return (spec % v) if v is not None else "?"
 
 
 def run_guarded(target, args):
@@ -170,7 +200,6 @@ class Supervisor:
         self.row_count = 0
         self.temp_warned = False
         self.got_frame = threading.Event()
-        self.mode = SOC_MODE_RECORD
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -238,14 +267,12 @@ class Supervisor:
                     del buf[:i]
                 if len(buf) < FRAME_LEN:
                     break
-                vals = struct.unpack(IMU_FMT, bytes(buf[2:FRAME_LEN]))
+                vals = struct.unpack(IMU_FMT, bytes(buf[1:FRAME_LEN]))
                 if not all(math.isfinite(v) for v in vals):
                     # False sync byte inside float data: drop it and keep scanning.
                     del buf[0]
                     continue
-                if not self.got_frame.is_set():
-                    self.mode = buf[1]
-                    self.got_frame.set()
+                self.got_frame.set()
                 del buf[:FRAME_LEN]
                 self.on_imu(vals)
 
@@ -362,8 +389,10 @@ class Supervisor:
                     size = os.stat(video).st_size
                 except OSError:
                     size = 0
-                log("  %ds elapsed: %d imu rows, %.1f MB video, soc %.1fC"
-                    % (elapsed, self.row_count, size / 1e6, self.soc_temp))
+                log("  %ds elapsed: %d imu rows, %.1f MB video, soc %.1fC, "
+                    "load %s, mem %s MB free"
+                    % (elapsed, self.row_count, size / 1e6, self.soc_temp,
+                       _fmt(load1(), "%.2f"), _fmt(mem_avail_mb(), "%.0f")))
             if self.stop.is_set():
                 log("shutdown requested, terminating vicap")
                 proc.terminate()
@@ -399,17 +428,14 @@ class Supervisor:
             threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
 
         if self.force_record:
-            log("--record: forcing record mode, ignoring stm32")
-        elif not self.got_frame.wait(MODE_WAIT_S):
-            log("no imu frame after %.0fs, recording anyway" % MODE_WAIT_S)
-        elif self.mode == SOC_MODE_IDLE:
-            # Powered up only so the recordings can be pulled over USB. Nothing
-            # to supervise, so get out of the way; the stm32 knows not to expect
-            # a heartbeat in this mode.
-            log("stm32 mode=%d (idle), exiting without recording" % self.mode)
-            return
+            log("--record: forcing record, ignoring imu presence")
+        elif self.got_frame.wait(IMU_WAIT_S):
+            log("imu stream present, recording")
         else:
-            log("stm32 mode=%d (record)" % self.mode)
+            # No stream: powered up only for servicing (e.g. USB pull). Get out of
+            # the way; the stm32 isn't streaming, so it expects no heartbeat.
+            log("no imu after %.0fs, idle (not recording)" % IMU_WAIT_S)
+            return
 
         # Only create a run directory once we know we are recording, so idle mode
         # leaves DATA_DIR/latest pointing at the last real recording.

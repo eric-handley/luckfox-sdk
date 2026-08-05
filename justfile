@@ -61,13 +61,15 @@ pull filepath:
     scp -r root@172.32.0.1:{{filepath}} .
 
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy
-# matches the host. These writes silently truncate often enough to be worth checking.
+# matches the host. Drop caches before reading back so the checksum reflects
+# what actually landed on flash, not the page cache (which passes even when the
+# on-disk bytes are still unflushed and a power cut would leave nulls).
 push src dst board="172.32.0.1":
     #!/usr/bin/env bash
     set -euo pipefail
     scp "{{src}}" root@{{board}}:"{{dst}}"
-    want=$(md5sum "{{src}}" | cut -d' ' -f1)
-    got=$(ssh root@{{board}} "sync && md5sum '{{dst}}'" | cut -d' ' -f1)
+    want=$(sha256sum "{{src}}" | cut -d' ' -f1)
+    got=$(ssh root@{{board}} "sync && echo 3 > /proc/sys/vm/drop_caches; sha256sum '{{dst}}'" | cut -d' ' -f1)
     if [ "$want" != "$got" ]; then
         echo "ERROR: checksum mismatch for {{dst}} (host $want != board $got) - transfer corrupt" >&2
         exit 1
