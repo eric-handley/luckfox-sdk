@@ -79,7 +79,7 @@ supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
     #!/usr/bin/env bash
     set -euo pipefail
     ssh root@{{board}} "/etc/init.d/S99uvr stop"
-    just push symlinks/uvr_supervisor.py {{dest}} {{board}}
+    just push symlinks/supervisor.py {{dest}} {{board}}
     just push symlinks/S99uvr /etc/init.d/S99uvr {{board}}
     ssh root@{{board}} "$(printf '%s\n' \
         'chmod +x /etc/init.d/S99uvr' \

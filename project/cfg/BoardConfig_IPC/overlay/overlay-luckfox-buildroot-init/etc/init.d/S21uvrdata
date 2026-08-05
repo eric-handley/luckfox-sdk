@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# uvrdata   Mount the recording partition at /data as journaled ext4.
+#
+# "data" is the growup (-) partition, so it already spans the whole SD card.
+# Format only when it isn't already ext4 (first boot, or a degraded journal-less
+# fs); otherwise just fsck and mount, preserving existing recordings.
+#
+
+DEV=/dev/block/by-name/data
+MNT=/data
+
+start() {
+    [ -e "$DEV" ] || { echo "uvrdata: $DEV not found"; return 1; }
+    mountpoint -q "$MNT" && return 0
+
+    # Collapse the skeleton's /data -> /userdata alias into one real mountpoint.
+    [ -L "$MNT" ] && rm -f "$MNT"
+    mkdir -p "$MNT"
+    rmdir /userdata 2>/dev/null
+
+    # mkfs.ext4 (never bare mke2fs, which makes journal-less ext2 here).
+    if [ "$(blkid -o value -s TYPE "$DEV" 2>/dev/null)" != "ext4" ]; then
+        echo "uvrdata: formatting $DEV as ext4"
+        mkfs.ext4 -F -L data "$DEV" && tune2fs -c 0 -i 0 "$DEV"
+    fi
+
+    e2fsck -y "$DEV"
+    resize2fs "$DEV"
+    mount -t ext4 -o rw,errors=remount-ro "$DEV" "$MNT"
+}
+
+case "$1" in
+    start) start ;;
+    stop)  umount "$MNT" 2>/dev/null ;;
+    *)     echo "Usage: $0 {start|stop}"; exit 1 ;;
+esac

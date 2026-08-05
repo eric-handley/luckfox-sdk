@@ -39,7 +39,10 @@ export RK_UBOOT_DEFCONFIG_FRAGMENT="rk-emmc.config"
 #       <partdef> := <size>[@<offset>](part-name)
 # Note:
 #   If the first partition offset is not 0x0, it must be added. Otherwise, it needn't adding.
-export RK_PARTITION_CMD_IN_ENV="32K(env),512K@32K(idblock),256K(uboot),32M(boot),512M(oem),256M(userdata),6G(rootfs)"
+# "data" is last with size "-" (growup): the kernel sizes it to the whole SD
+# card at runtime, so it fills the card without bloating the flash image. It is
+# left out of RK_PARTITION_FS_TYPE_CFG so S21uvrdata owns its format/mount.
+export RK_PARTITION_CMD_IN_ENV="32K(env),512K@32K(idblock),256K(uboot),32M(boot),512M(oem),6G(rootfs),-(data)"
 
 # config partition's filesystem type (squashfs is readonly)
 # emmc:    squashfs/ext4
@@ -50,7 +53,8 @@ export RK_PARTITION_CMD_IN_ENV="32K(env),512K@32K(idblock),256K(uboot),32M(boot)
 #         AAAA ----------> partition name
 #         /BBBB/CCCC ----> partition mount point
 #         ext4 ----------> partition filesystem type
-export RK_PARTITION_FS_TYPE_CFG=rootfs@IGNORE@ext4,userdata@/userdata@ext4,oem@/oem@ext4
+# "data" is omitted on purpose; S21uvrdata formats and mounts it.
+export RK_PARTITION_FS_TYPE_CFG=rootfs@IGNORE@ext4,oem@/oem@ext4
 
 # config filesystem compress (Just for squashfs or ubifs)
 # squashfs: lz4/lzo/lzma/xz/gzip, default xz
