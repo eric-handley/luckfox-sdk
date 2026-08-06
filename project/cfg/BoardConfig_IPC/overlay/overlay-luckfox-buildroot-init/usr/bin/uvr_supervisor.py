@@ -57,6 +57,7 @@ CSV_FLUSH_EVERY      = 100                           # flush CSV to disk every N
 RESTART_DELAY_S      = 2.0                           # pause before relaunch after error
 MAX_RECORD_ATTEMPTS  = 5                             # give up after this many failed tries
 PROGRESS_EVERY_S     = 5                             # in-recording progress log period
+SETTLE_AFTER_UNMOUNT_S = 5.0                         # let the SD card commit its cache before power-off
 # ---------------------------------------------------------------------------
 
 # Heartbeat state values, mirroring soc_status_t in the stm32 uart_format.h.
@@ -77,7 +78,7 @@ FRAME_LEN = 1 + IMU_LEN
 # The presence of the IMU stream is the record signal: if the stm32 is streaming
 # frames we record, if none arrive in this window we are idle (booted only for
 # servicing, e.g. USB pull) and exit without touching the camera.
-IMU_WAIT_S = 5.0
+IMU_WAIT_S = 3.0
 
 # Once recording, the stm32 streams a frame every loop, so a gap this long means
 # the stream stopped (FC requested a stop, or the link died): finalize and stop.
@@ -488,9 +489,35 @@ class Supervisor:
         elif self.got_frame.wait(IMU_WAIT_S):
             log("imu stream present, recording")
         else:
-            # No stream: powered up only for servicing (e.g. USB pull). Get out of
-            # the way; the stm32 isn't streaming, so it expects no heartbeat.
+            # No stream: this boot is idle, powered up only to service the card
+            # (e.g. pull recordings over ssh). Remount /data read-only before we
+            # get out of the way: a read-only fs is never dirtied, so the stm32 can
+            # cut power at any moment -- planned or a surprise yank -- and the card
+            # stays clean, with no journal recovery or e2fsck on the next boot. The
+            # data is still fully readable over ssh.
             log("no imu after %.0fs, idle (not recording)" % IMU_WAIT_S)
+
+            # Our stdout/stderr are the init script's >>/data/startup.log, which
+            # holds /data open for writing and makes remount,ro fail EBUSY. Move
+            # them to /dev/kmsg (closing the startup.log fd) first, exactly as the
+            # finalize path does before it unmounts. log() keeps working, now on
+            # the console/kernel log.
+            os.sync()
+            try:
+                kfd = os.open("/dev/kmsg", os.O_WRONLY)
+                os.dup2(kfd, 1)
+                os.dup2(kfd, 2)
+                os.close(kfd)
+            except OSError:
+                pass
+
+            rc = subprocess.call(["mount", "-o", "remount,ro", DATA_DIR])
+            if rc == 0:
+                log("/data remounted read-only for idle")
+                klog("idle: /data remounted read-only, safe to cut power")
+            else:
+                log("could not remount /data read-only (rc=%d)" % rc)
+                klog("idle: FAILED to remount /data read-only (rc=%d)" % rc)
             return
 
         # Only create a run directory once we know we are recording, so idle mode
@@ -627,12 +654,8 @@ class Supervisor:
                 klog("finalize: /data NOT quiesced, sync only (will need fsck)")
                 os.sync()
 
-        # umount/remount return once the block layer is flushed, but a card with
-        # a write-back cache may not have physically committed the final writes to
-        # NAND yet. Give it a full second to settle before we let the stm32 pull
-        # the rails, so the clean-unmount state actually survives the power cut.
         os.sync()
-        time.sleep(1.0)
+        time.sleep(SETTLE_AFTER_UNMOUNT_S)
 
         # COMPLETE tells the stm32 to cut our power. Repeat it on the heartbeat
         # interval until it does, so a single dropped byte doesn't strand us
