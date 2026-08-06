@@ -47,7 +47,7 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_MINUTES        = 10
+VICAP_MINUTES        = 5
 VICAP_FRAMES         = VICAP_MINUTES * 60 * 30       # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]
 
@@ -63,7 +63,8 @@ SOC_INIT      = 1
 SOC_RECORDING = 2
 SOC_STOPPED   = 3
 SOC_ERROR     = 4
-SOC_COMPLETE  = 5   # last byte we ever send; the stm32 cuts our power on it
+SOC_STOPPING  = 5   # imu stream stopped: saving the partial file and unmounting
+SOC_COMPLETE  = 6   # the stm32 cuts our power on it; we repeat it until it does
 
 # IMU wire format: sync byte 0xAA, then a packed imu_data_t (accel[3], gyro[3],
 # temp), all little-endian floats.
@@ -76,6 +77,14 @@ FRAME_LEN = 1 + IMU_LEN
 # frames we record, if none arrive in this window we are idle (booted only for
 # servicing, e.g. USB pull) and exit without touching the camera.
 IMU_WAIT_S = 5.0
+
+# Once recording, the stm32 streams a frame every loop, so a gap this long means
+# the stream stopped (FC requested a stop, or the link died): finalize and stop.
+IMU_STOP_S = 5.0
+# How long to let vicap flush and exit after SIGTERM before we SIGKILL it. It
+# fflushes its write buffer and closes the file on the signal, so err generous to
+# keep the partial recording.
+VICAP_STOP_GRACE_S = 10.0
 
 CSV_HEADER = ("timestamp,accel_x_g,accel_y_g,accel_z_g,"
               "gyro_x_dps,gyro_y_dps,gyro_z_dps,imu_temp_c,soc_temp_c")
@@ -211,6 +220,8 @@ class Supervisor:
         self.row_count = 0
         self.temp_warned = False
         self.got_frame = threading.Event()
+        self.last_frame = 0.0      # time.time() of the most recent imu frame
+        self.graceful_stop = False # imu stream went quiet; finalize as a clean stop
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -284,6 +295,7 @@ class Supervisor:
                     del buf[0]
                     continue
                 self.got_frame.set()
+                self.last_frame = time.time()
                 del buf[:FRAME_LEN]
                 self.on_imu(vals)
 
@@ -354,6 +366,7 @@ class Supervisor:
             self.klog = klog_fd
             self.row_count = 0
             self.soc_temp = self.read_soc_temp()
+        self.last_frame = time.time()   # so the drought watchdog has a baseline
         self.state = SOC_RECORDING
 
         argv = [VICAP_BIN, "-o", video, "-l", str(VICAP_FRAMES), *VICAP_EXTRA_ARGS]
@@ -409,6 +422,18 @@ class Supervisor:
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return proc.poll()
+            # In --record (manual ssh) mode there may be no stream at all, so the
+            # drought check would fire instantly; skip it there.
+            if not self.force_record and (time.time() - self.last_frame) > IMU_STOP_S:
+                log("imu stream stopped for %.0fs, finalizing recording" % IMU_STOP_S)
+                self.graceful_stop = True
+                self.state = SOC_STOPPING
+                proc.terminate()   # SIGTERM: vicap flushes and closes the partial
+                try:
+                    proc.wait(timeout=VICAP_STOP_GRACE_S)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                 return proc.poll()
@@ -474,7 +499,7 @@ class Supervisor:
                 log("record() raised, aborting:\n" + traceback.format_exc())
                 self.state = SOC_ERROR
                 break
-            if self.stop.is_set():
+            if self.stop.is_set() or self.graceful_stop:
                 break
             if rc == 0:
                 log("recording finished cleanly")
@@ -485,33 +510,92 @@ class Supervisor:
             time.sleep(RESTART_DELAY_S)
 
         # Stop the reader/kmsg/heartbeat threads so nothing else touches the
-        # port or the output files, then send the final state ourselves.
+        # port or the output files, then drive the final state ourselves.
         self.stop.set()
-        if rc == 0:
-            if self.force_record:
-                # Stay powered so an ssh session survives; leave /data mounted.
+
+        # A clean frame-limit finish (rc==0) and a graceful stop (imu stream went
+        # quiet, partial already saved by vicap on SIGTERM) both mean "recording
+        # is safely on disk, cut power". Anything else is a genuine failure.
+        done = (rc == 0) or self.graceful_stop
+
+        if self.force_record:
+            # Stay powered so an ssh session survives; leave /data mounted.
+            if done:
                 log("syncing to disk")
                 os.sync()
-                self.state = SOC_STOPPED
-            else:
-                # COMPLETE makes the stm32 cut our power, so leave /data cleanly
-                # unmounted first: sync, stop logging (our log fds live on /data
-                # and would block the umount), then umount. Fall back to a plain
-                # sync if something else is still holding /data.
-                log("syncing and unmounting /data before power-off")
-                os.sync()
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull, 1)
-                os.dup2(devnull, 2)
-                os.close(devnull)
-                if subprocess.call(["umount", DATA_DIR]) != 0:
-                    os.sync()
-                self.state = SOC_COMPLETE
+            self.state = SOC_STOPPED
+            try:
+                os.write(fd, bytes([self.state]))
+            except OSError:
+                pass
+            os.close(fd)
+            return
+
+        if not done:
+            # Gave up on a real error. Report it and let the stm32's heartbeat
+            # timeout deal with power rather than unmounting/completing.
+            self.state = SOC_ERROR
+            try:
+                os.write(fd, bytes([self.state]))
+            except OSError:
+                pass
+            os.close(fd)
+            return
+
+        # Tell the stm32 we're finalizing, then leave /data cleanly unmounted.
+        self.state = SOC_STOPPING
         try:
             os.write(fd, bytes([self.state]))
         except OSError:
             pass
-        os.close(fd)
+        log("syncing and unmounting /data before power-off")
+        os.sync()
+
+        # Our stdout/stderr (incl. the supervisor.log fd) live on /data and would
+        # hold it busy, and so would our cwd if it's anywhere under /data. Move
+        # both off it first. Logging goes to /dev/kmsg rather than /dev/null so
+        # the umount result stays visible on the console we're capturing.
+        try:
+            os.chdir("/")
+        except OSError:
+            pass
+        try:
+            kfd = os.open("/dev/kmsg", os.O_WRONLY)
+            os.dup2(kfd, 1)
+            os.dup2(kfd, 2)
+            os.close(kfd)
+        except OSError:
+            pass
+
+        # Retry: right after reaping vicap the mount can briefly report EBUSY.
+        # The bare-sync fallback does NOT mark the fs clean, so a power cut after
+        # it leaves /data needing an fsck (a leaked block / bitmap diff) - only a
+        # real umount avoids that, so we try hard for one.
+        umounted = False
+        for attempt in range(5):
+            rc = subprocess.call(["umount", DATA_DIR])
+            if rc == 0:
+                umounted = True
+                break
+            log("umount /data failed (rc=%d), retry %d/5" % (rc, attempt + 1))
+            os.sync()
+            time.sleep(0.5)
+        if umounted:
+            log("/data unmounted cleanly")
+        else:
+            log("could not unmount /data; synced only, fs will need fsck")
+            os.sync()
+
+        # COMPLETE tells the stm32 to cut our power. Repeat it on the heartbeat
+        # interval until it does, so a single dropped byte doesn't strand us
+        # powered; the loop ends when the rails are pulled out from under us.
+        self.state = SOC_COMPLETE
+        while True:
+            try:
+                os.write(fd, bytes([self.state]))
+            except OSError:
+                pass
+            time.sleep(HEARTBEAT_INTERVAL_S)
 
 
 def open_serial(path):

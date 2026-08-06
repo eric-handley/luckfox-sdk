@@ -16,14 +16,6 @@ build:
     rm -rf output/out/rootfs_uclibc_rv1106 sysdrv/out/rootfs_uclibc_rv1106 sysdrv/out/rootfs_uclibc_rv1106.tar
     docker run --rm -v "$(pwd):/workspace" --tmpfs /tmp:exec -u $(id -u):$(id -g) luckfox-sdk-builder ./build.sh | tee logs/docker-build-$(date +%Y-%m-%d_%H:%M:%S).log
 
-# Build the uvr-vicap capture binary in the container and copy it to the board
-vicap board="172.32.0.1" dest="/oem/usr/bin/":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rm -f media/samples/simple_test/uvr-vicap
-    just docker-run "make -C media/samples/simple_test uvr-vicap RK_MEDIA_CROSS=arm-rockchip830-linux-uclibcgnueabihf RK_CHIP=rv1106"
-    just push media/samples/simple_test/uvr-vicap {{dest}}/uvr-vicap {{board}}
-
 flash device="/dev/mmcblk0":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -60,6 +52,11 @@ clean:
 pull filepath:
     scp -r root@172.32.0.1:{{filepath}} .
 
+# Mux a raw HEVC elementary stream into an mp4. The stream carries no timestamps
+# or framerate, so force 30fps on both input and output
+mux src="latest/video.h265" dst="latest/video.mp4":
+    ffmpeg -y -r 30 -i "{{src}}" -c copy -r 30 -video_track_timescale 30000 "{{dst}}"
+
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy
 # matches the host. Drop caches before reading back so the checksum reflects
 # what actually landed on flash, not the page cache (which passes even when the
@@ -77,7 +74,7 @@ push src dst board="172.32.0.1":
     echo "pushed {{src}} -> {{dst}} ($want)"
 
 # Copy the SoC supervisor to the board, restart it and show any startup errors
-supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
+run-supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
     #!/usr/bin/env bash
     set -euo pipefail
     ssh root@{{board}} "/etc/init.d/S99uvr stop"
@@ -93,24 +90,33 @@ supervisor board="172.32.0.1" dest="/usr/bin/uvr_supervisor.py":
         'echo "--- /data/latest/supervisor.log ---"' \
         'cat /data/latest/supervisor.log 2>/dev/null')"
 
-copy-iq board="172.32.0.1":
-    just push symlinks/imx519_arducam-imx519_default.json /etc/iqfiles/imx519_arducam-imx519_default.json {{board}}
-    just push symlinks/imx519_arducam-imx519_default.json /oem/usr/share/iqfiles/imx519_arducam-imx519_default.json {{board}}
+copy-supervisor:
+    just push symlinks/supervisor.py /usr/bin/uvr_supervisor.py
 
-# Web UI to edit the IQ JSON and deploy it to the board (scp + restart streamer)
-tuner board="172.32.0.1" port="8099":
-    BOARD={{board}} PORT={{port}} node ../iq-tuner/server.js
+copy-iq:
+    just push symlinks/imx519_arducam-imx519_default.json /etc/iqfiles/imx519_arducam-imx519_default.json
+    just push symlinks/imx519_arducam-imx519_default.json /oem/usr/share/iqfiles/imx519_arducam-imx519_default.json
 
-deploy board="172.32.0.1" deploy="true":
+# Build the uvr-vicap capture binary in the container and copy it to the board
+copy-vicap dest="/oem/usr/bin/":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f media/samples/simple_test/uvr-vicap
+    just docker-run "make -C media/samples/simple_test uvr-vicap RK_MEDIA_CROSS=arm-rockchip830-linux-uclibcgnueabihf RK_CHIP=rv1106"
+    just push media/samples/simple_test/uvr-vicap {{dest}}/uvr-vicap
+
+copy-latest:
+    just pull /data/latest/
+    just pull /data/startup.log && mv startup.log latest
+    just pull /data/recordings.log && mv recordings.log latest
+    just mux
+
+restart-rtsp board="172.32.0.1":
     #!/usr/bin/env bash
     set -euo pipefail
     streamer="simple_vi_bind_venc_rtsp -I 0 -w 1920 -h 1080 -e h265"
     proc="simple_vi_bind_venc_rtsp"
-    if [ "{{deploy}}" = "true" ]; then
-        just copy-iq {{board}}
-    else
-        echo "deploy=false: skipping IQ JSON copy"
-    fi
+    just copy-iq {{board}}
     # newlines (not "; ") so the "nohup ... &" line isn't followed by ";" (busybox sh)
     ssh root@{{board}} "$(printf '%s\n' \
         '. /etc/profile >/dev/null 2>&1 || true' \
