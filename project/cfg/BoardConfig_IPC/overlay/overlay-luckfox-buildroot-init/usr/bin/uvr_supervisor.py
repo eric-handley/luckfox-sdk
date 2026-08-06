@@ -205,6 +205,25 @@ def make_run_dir():
     return path
 
 
+def move_stdio_to_kmsg():
+    """Redirect fd 1/2 to /dev/kmsg, closing whatever they pointed at before
+    (e.g. a file on /data). Used before remounting/unmounting /data so our own
+    stdio doesn't hold it busy; log() keeps working, now on the console."""
+    try:
+        kfd = os.open("/dev/kmsg", os.O_WRONLY)
+        os.dup2(kfd, 1)
+        os.dup2(kfd, 2)
+        os.close(kfd)
+    except OSError:
+        pass
+
+
+def close_fds(*fds):
+    for fd in fds:
+        if fd is not None:
+            os.close(fd)
+
+
 def open_output(path, preamble=b""):
     """Create a run output file, returning None if it can't be written.
 
@@ -238,6 +257,20 @@ class Supervisor:
         self.last_frame = 0.0      # time.time() of the most recent imu frame
         self.graceful_stop = False # imu stream went quiet; finalize as a clean stop
         self.launch_failed = False # vicap binary missing / couldn't exec: don't retry
+
+    def set_state(self, state):
+        with self.lock:
+            self.state = state
+
+    def send_state(self, fd):
+        """Write the current state to the uart, snapshotting it under the same
+        lock as set_state() so a concurrent transition can't be torn."""
+        with self.lock:
+            b = bytes([self.state])
+        try:
+            os.write(fd, b)
+        except OSError:
+            pass
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -359,8 +392,10 @@ class Supervisor:
         # the log and bury the first, real failure. Re-arm on the next success.
         warned = False
         while not self.stop.is_set():
+            with self.lock:
+                b = bytes([self.state])
             try:
-                os.write(fd, bytes([self.state]))
+                os.write(fd, b)
                 warned = False
             except OSError as e:
                 if not warned:
@@ -383,7 +418,7 @@ class Supervisor:
             self.row_count = 0
             self.soc_temp = self.read_soc_temp()
         self.last_frame = time.time()   # so the drought watchdog has a baseline
-        self.state = SOC_RECORDING
+        self.set_state(SOC_RECORDING)
 
         argv = [VICAP_BIN, "-o", video, "-l", str(VICAP_FRAMES), *VICAP_EXTRA_ARGS]
         log("starting capture: %s" % " ".join(argv))
@@ -407,15 +442,12 @@ class Supervisor:
             self.launch_failed = True
             rc = -1
         finally:
-            if vicap_log_fd is not None:
-                os.close(vicap_log_fd)
+            close_fds(vicap_log_fd)
 
         with self.lock:
             self.csv = None
             self.klog = None
-        for f in (csv_fd, klog_fd):
-            if f is not None:
-                os.close(f)
+        close_fds(csv_fd, klog_fd)
         log("capture ended: rc=%s, %d imu rows" % (rc, self.row_count))
         return rc
 
@@ -451,7 +483,7 @@ class Supervisor:
                 log("imu stream stopped for %.0fs, finalizing recording" % IMU_STOP_S)
                 klog("drought: imu quiet %.0fs, starting graceful stop" % IMU_STOP_S)
                 self.graceful_stop = True
-                self.state = SOC_STOPPING
+                self.set_state(SOC_STOPPING)
                 proc.terminate()   # SIGTERM: vicap flushes and closes the partial
                 try:
                     proc.wait(timeout=VICAP_STOP_GRACE_S)
@@ -460,112 +492,36 @@ class Supervisor:
                 return proc.poll()
             time.sleep(0.2)
 
-    # --- main --------------------------------------------------------------
-    def run(self):
-        log("supervisor starting (port=%s)" % SERIAL_PORT)
-        fd = open_serial(SERIAL_PORT)
+    # --- idle / finalize -----------------------------------------------------
+    def idle_shutdown(self):
+        # No stream: this boot is idle, powered up only to service the card
+        # (e.g. pull recordings over ssh). Remount /data read-only before we
+        # get out of the way: a read-only fs is never dirtied, so the stm32 can
+        # cut power at any moment -- planned or a surprise yank -- and the card
+        # stays clean, with no journal recovery or e2fsck on the next boot. The
+        # data is still fully readable over ssh.
+        log("no imu after %.0fs, idle (not recording)" % IMU_WAIT_S)
 
-        for handler in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(handler, lambda *_: self.stop.set())
+        # Our stdout/stderr are the init script's >>/data/startup.log, which
+        # holds /data open for writing and makes remount,ro fail EBUSY. Move
+        # them to /dev/kmsg (closing the startup.log fd) first, exactly as the
+        # finalize path does before it unmounts. log() keeps working, now on
+        # the console/kernel log.
+        os.sync()
+        move_stdio_to_kmsg()
 
-        threads = [(self.reader_loop, (fd,)), (self.heartbeat_loop, (fd,))]
-
-        # /dev/kmsg starts at the oldest surviving record, so the first drain
-        # gives us the boot log; the tail thread then continues from exactly
-        # where that stopped.
-        try:
-            kfd = os.open(KMSG_PATH, os.O_RDONLY | os.O_NONBLOCK)
-            self.boot_log = self.drain_kmsg(kfd)
-            log("captured %d bytes of kernel boot log" % len(self.boot_log))
-            threads.append((self.kmsg_loop, (kfd,)))
-        except OSError as e:
-            log("cannot open %s (%s), no kernel log will be captured" % (KMSG_PATH, e))
-
-        for target, args in threads:
-            threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
-
-        if self.force_record:
-            log("--record: forcing record, ignoring imu presence")
-        elif self.got_frame.wait(IMU_WAIT_S):
-            log("imu stream present, recording")
+        rc = subprocess.call(["mount", "-o", "remount,ro", DATA_DIR])
+        if rc == 0:
+            log("/data remounted read-only for idle")
+            klog("idle: /data remounted read-only, safe to cut power")
         else:
-            # No stream: this boot is idle, powered up only to service the card
-            # (e.g. pull recordings over ssh). Remount /data read-only before we
-            # get out of the way: a read-only fs is never dirtied, so the stm32 can
-            # cut power at any moment -- planned or a surprise yank -- and the card
-            # stays clean, with no journal recovery or e2fsck on the next boot. The
-            # data is still fully readable over ssh.
-            log("no imu after %.0fs, idle (not recording)" % IMU_WAIT_S)
+            log("could not remount /data read-only (rc=%d)" % rc)
+            klog("idle: FAILED to remount /data read-only (rc=%d)" % rc)
 
-            # Our stdout/stderr are the init script's >>/data/startup.log, which
-            # holds /data open for writing and makes remount,ro fail EBUSY. Move
-            # them to /dev/kmsg (closing the startup.log fd) first, exactly as the
-            # finalize path does before it unmounts. log() keeps working, now on
-            # the console/kernel log.
-            os.sync()
-            try:
-                kfd = os.open("/dev/kmsg", os.O_WRONLY)
-                os.dup2(kfd, 1)
-                os.dup2(kfd, 2)
-                os.close(kfd)
-            except OSError:
-                pass
-
-            rc = subprocess.call(["mount", "-o", "remount,ro", DATA_DIR])
-            if rc == 0:
-                log("/data remounted read-only for idle")
-                klog("idle: /data remounted read-only, safe to cut power")
-            else:
-                log("could not remount /data read-only (rc=%d)" % rc)
-                klog("idle: FAILED to remount /data read-only (rc=%d)" % rc)
-            return
-
-        # Only create a run directory once we know we are recording, so idle mode
-        # leaves DATA_DIR/latest pointing at the last real recording.
-        run_dir = make_run_dir()
-
-        # Everything log() writes goes to stderr, so redirecting it here also
-        # captures any traceback python prints on the way out. Startup lines up
-        # to this point stay in the init script's log.
-        slog = open_output(os.path.join(run_dir, "supervisor.log"))
-        if slog is not None:
-            os.dup2(slog, 2)
-            os.close(slog)
-        log("output=%s" % run_dir)
-
-        rc = -1
-        attempt = 0
-        while not self.stop.is_set():
-            try:
-                rc = self.record(run_dir, attempt)
-            except Exception:
-                # This is our own bug (bad format string, TypeError, ...), not a
-                # vicap failure. Don't retry it forever into video.1, video.2, ...;
-                # surface it and stop. state=ERROR keeps the heartbeat meaningful
-                # so the stm32 still sees a reason rather than silence.
-                log("record() raised, aborting:\n" + traceback.format_exc())
-                self.state = SOC_ERROR
-                break
-            if self.stop.is_set() or self.graceful_stop:
-                break
-            if rc == 0:
-                log("recording finished cleanly")
-                break
-            self.state = SOC_ERROR
-            if self.launch_failed:
-                # Permanent (missing/!exec binary): retrying just spews files.
-                log("vicap launch failed permanently, giving up")
-                break
-            attempt += 1
-            if attempt >= MAX_RECORD_ATTEMPTS:
-                log("giving up after %d failed attempts" % attempt)
-                break
-            log("state=ERROR, retrying in %.1fs (attempt %d/%d)"
-                % (RESTART_DELAY_S, attempt, MAX_RECORD_ATTEMPTS))
-            time.sleep(RESTART_DELAY_S)
-
-        # Stop the reader/kmsg/heartbeat threads so nothing else touches the
-        # port or the output files, then drive the final state ourselves.
+    def finalize(self, fd, rc):
+        """Stop the reader/kmsg/heartbeat threads and drive the final state
+        ourselves: unmount /data and hand off to the stm32 for power-off, or
+        (force_record / a real failure) leave the port and fs as appropriate."""
         self.stop.set()
 
         # A clean frame-limit finish (rc==0) and a graceful stop (imu stream went
@@ -578,11 +534,8 @@ class Supervisor:
             if done:
                 log("syncing to disk")
                 os.sync()
-            self.state = SOC_STOPPED
-            try:
-                os.write(fd, bytes([self.state]))
-            except OSError:
-                pass
+            self.set_state(SOC_STOPPED)
+            self.send_state(fd)
             os.close(fd)
             return
 
@@ -591,40 +544,27 @@ class Supervisor:
             # timeout deal with power rather than unmounting/completing.
             klog("finalize: NOT done (rc=%s graceful=%s) -> SOC_ERROR, no unmount"
                  % (rc, self.graceful_stop))
-            self.state = SOC_ERROR
-            try:
-                os.write(fd, bytes([self.state]))
-            except OSError:
-                pass
+            self.set_state(SOC_ERROR)
+            self.send_state(fd)
             os.close(fd)
             return
 
         # Tell the stm32 we're finalizing, then leave /data cleanly unmounted.
         klog("finalize: done, SOC_STOPPING, about to sync /data")
-        self.state = SOC_STOPPING
-        try:
-            os.write(fd, bytes([self.state]))
-        except OSError:
-            pass
+        self.set_state(SOC_STOPPING)
+        self.send_state(fd)
         log("syncing and unmounting /data before power-off")
         os.sync()
         klog("finalize: sync() returned, unmounting /data")
 
         # Our stdout/stderr (incl. the supervisor.log fd) live on /data and would
         # hold it busy, and so would our cwd if it's anywhere under /data. Move
-        # both off it first. Logging goes to /dev/kmsg rather than /dev/null so
-        # the umount result stays visible on the console we're capturing.
+        # both off it first.
         try:
             os.chdir("/")
         except OSError:
             pass
-        try:
-            kfd = os.open("/dev/kmsg", os.O_WRONLY)
-            os.dup2(kfd, 1)
-            os.dup2(kfd, 2)
-            os.close(kfd)
-        except OSError:
-            pass
+        move_stdio_to_kmsg()
 
         # Retry: right after reaping vicap the mount can briefly report EBUSY.
         umounted = False
@@ -661,13 +601,88 @@ class Supervisor:
         # interval until it does, so a single dropped byte doesn't strand us
         # powered; the loop ends when the rails are pulled out from under us.
         klog("finalize: sending SOC_COMPLETE until power is cut")
-        self.state = SOC_COMPLETE
+        self.set_state(SOC_COMPLETE)
         while True:
-            try:
-                os.write(fd, bytes([self.state]))
-            except OSError:
-                pass
+            self.send_state(fd)
             time.sleep(HEARTBEAT_INTERVAL_S)
+
+    # --- main --------------------------------------------------------------
+    def run(self):
+        log("supervisor starting (port=%s)" % SERIAL_PORT)
+        fd = open_serial(SERIAL_PORT)
+
+        for handler in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(handler, lambda *_: self.stop.set())
+
+        threads = [(self.reader_loop, (fd,)), (self.heartbeat_loop, (fd,))]
+
+        # /dev/kmsg starts at the oldest surviving record, so the first drain
+        # gives us the boot log; the tail thread then continues from exactly
+        # where that stopped.
+        try:
+            kfd = os.open(KMSG_PATH, os.O_RDONLY | os.O_NONBLOCK)
+            self.boot_log = self.drain_kmsg(kfd)
+            log("captured %d bytes of kernel boot log" % len(self.boot_log))
+            threads.append((self.kmsg_loop, (kfd,)))
+        except OSError as e:
+            log("cannot open %s (%s), no kernel log will be captured" % (KMSG_PATH, e))
+
+        for target, args in threads:
+            threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
+
+        if self.force_record:
+            log("--record: forcing record, ignoring imu presence")
+        elif self.got_frame.wait(IMU_WAIT_S):
+            log("imu stream present, recording")
+        else:
+            self.idle_shutdown()
+            return
+
+        # Only create a run directory once we know we are recording, so idle mode
+        # leaves DATA_DIR/latest pointing at the last real recording.
+        run_dir = make_run_dir()
+
+        # Everything log() writes goes to stderr, so redirecting it here also
+        # captures any traceback python prints on the way out. Startup lines up
+        # to this point stay in the init script's log.
+        slog = open_output(os.path.join(run_dir, "supervisor.log"))
+        if slog is not None:
+            os.dup2(slog, 2)
+            os.close(slog)
+        log("output=%s" % run_dir)
+
+        rc = -1
+        attempt = 0
+        while not self.stop.is_set():
+            try:
+                rc = self.record(run_dir, attempt)
+            except Exception:
+                # This is our own bug (bad format string, TypeError, ...), not a
+                # vicap failure. Don't retry it forever into video.1, video.2, ...;
+                # surface it and stop. state=ERROR keeps the heartbeat meaningful
+                # so the stm32 still sees a reason rather than silence.
+                log("record() raised, aborting:\n" + traceback.format_exc())
+                self.set_state(SOC_ERROR)
+                break
+            if self.stop.is_set() or self.graceful_stop:
+                break
+            if rc == 0:
+                log("recording finished cleanly")
+                break
+            self.set_state(SOC_ERROR)
+            if self.launch_failed:
+                # Permanent (missing/!exec binary): retrying just spews files.
+                log("vicap launch failed permanently, giving up")
+                break
+            attempt += 1
+            if attempt >= MAX_RECORD_ATTEMPTS:
+                log("giving up after %d failed attempts" % attempt)
+                break
+            log("state=ERROR, retrying in %.1fs (attempt %d/%d)"
+                % (RESTART_DELAY_S, attempt, MAX_RECORD_ATTEMPTS))
+            time.sleep(RESTART_DELAY_S)
+
+        self.finalize(fd, rc)
 
 
 def open_serial(path):
