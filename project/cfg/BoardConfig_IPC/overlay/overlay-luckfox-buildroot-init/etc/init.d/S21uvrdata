@@ -14,11 +14,6 @@ start() {
     [ -e "$DEV" ] || { echo "uvrdata: $DEV not found"; return 1; }
     mountpoint -q "$MNT" && return 0
 
-    # Collapse the skeleton's /data -> /userdata alias into one real mountpoint.
-    [ -L "$MNT" ] && rm -f "$MNT"
-    mkdir -p "$MNT"
-    rmdir /userdata 2>/dev/null
-
     # Format only a blank device or the old journal-less ext2; a journaled ext4
     # is left alone. busybox blkid reports no TYPE, so check for the journal
     # directly with dumpe2fs. mkfs.ext4 (never bare mke2fs, which makes ext2).

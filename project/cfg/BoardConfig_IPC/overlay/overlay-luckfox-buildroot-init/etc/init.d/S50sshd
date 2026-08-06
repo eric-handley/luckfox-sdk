@@ -9,40 +9,44 @@
 umask 077
 
 start() {
-	chown root:root /var/empty/
-	# Create any missing keys
-	/usr/bin/ssh-keygen -A
+    # sshd's privsep chroot dir must be owned by root and not group/world
+    # writable. This rootfs is owned uid 1000 and read-only, so we can't chown
+    # the baked /var/empty. Mount a fresh root-owned tmpfs over it instead.
+    mountpoint -q /var/empty || \
+        mount -t tmpfs -o mode=0755,size=64k tmpfs /var/empty
+    # Host keys are baked into /etc/ssh; ssh-keygen -A is a no-op (and can't
+    # write the read-only rootfs anyway), so don't let it fail the boot.
+    /usr/bin/ssh-keygen -A 2>/dev/null || true
 
-	printf "Starting sshd: "
-	/usr/sbin/sshd
-	touch /var/lock/sshd
-	echo "OK"
+    printf "Starting sshd: "
+    /usr/sbin/sshd
+    touch /var/lock/sshd
+    echo "OK"
 }
 stop() {
-	printf "Stopping sshd: "
-	killall sshd
-	rm -f /var/lock/sshd
-	echo "OK"
+    printf "Stopping sshd: "
+    killall sshd
+    rm -f /var/lock/sshd
+    echo "OK"
 }
 restart() {
-	stop
-	start
+    stop
+    start
 }
 
 case "$1" in
   start)
-	start
-	;;
+    start
+    ;;
   stop)
-	stop
-	;;
+    stop
+    ;;
   restart|reload)
-	restart
-	;;
+    restart
+    ;;
   *)
-	echo "Usage: $0 {start|stop|restart}"
-	exit 1
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
 esac
 
 exit $?
-

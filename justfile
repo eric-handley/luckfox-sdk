@@ -36,7 +36,24 @@ flash device="/dev/mmcblk0":
     sudo dd if=output/image/sd_update.img of=/dev/mmcblk0 bs=1M status=progress conv=fsync oflag=direct
     echo "Flash complete! Syncing..."
     sync
-    echo "Done." 
+
+    # Wipe /data too: sd_update.img only covers env..rootfs, so the growup data
+    # partition survives a plain reflash. No on-disk partition table exists
+    # (Rockchip uses the kernel blkdevparts= cmdline), so target it by byte
+    # offset from RK_PARTITION_CMD_IN_ENV:
+    #   32K env +512K idblock +256K uboot +32M boot +512M oem +6G rootfs = data@
+    DATA_OFFSET=7013695488
+    magic=$(sudo dd if=/dev/mmcblk0 bs=1 skip=$((DATA_OFFSET + 1080)) count=2 2>/dev/null | xxd -p)
+    label=$(sudo dd if=/dev/mmcblk0 bs=1 skip=$((DATA_OFFSET + 1144)) count=16 2>/dev/null | tr -d '\0')
+    if [ "$magic" = "53ef" ] && [ "$label" = "data" ]; then
+        echo "Wiping /data (ext4 'data' @ $DATA_OFFSET)..."
+        sudo dd if=/dev/zero of=/dev/mmcblk0 bs=512 seek=$((DATA_OFFSET / 512)) count=32768 conv=fsync status=none
+        sync
+        echo "/data wiped (16 MiB zeroed: superblock, descriptors, journal)."
+    else
+        echo "No ext4 'data' fs at $DATA_OFFSET (magic=$magic label='$label'); skipping /data wipe."
+    fi
+    echo "Done."
 
 picocom-logs:
     picocom -b 115200 /dev/ttyACM0 | tee logs/rv1106-boot-$(date +%Y-%m-%d_%H:%M:%S).log
@@ -106,10 +123,22 @@ copy-vicap dest="/oem/usr/bin/":
     just push media/samples/simple_test/uvr-vicap {{dest}}/uvr-vicap
 
 copy-latest:
-    just pull /data/latest/
+    rm latest/* | continue
     just pull /data/startup.log && mv startup.log latest
     just pull /data/recordings.log && mv recordings.log latest
+    just pull /data/latest/
     just mux
+
+# data-journal-info:
+#     DEV=/dev/mmcblk0
+#     OFF=7013695488
+#     LOOP=$(sudo losetup -f --show -r -o 7013695488 "$DEV")
+#     echo "loop=$LOOP"
+#     echo "=== superblock ==="
+#     sudo dumpe2fs -h "$LOOP" 2>/dev/null | grep -Ei 'Filesystem state|feature|Mount count|Last (mount|write)|Lifetime'
+#     echo "=== journal (empty == cleanly unmounted) ==="
+#     sudo debugfs -R "logdump -S" "$LOOP" 2>/dev/null | head -50
+#     sudo losetup -d "$LOOP"
 
 restart-rtsp board="172.32.0.1":
     #!/usr/bin/env bash

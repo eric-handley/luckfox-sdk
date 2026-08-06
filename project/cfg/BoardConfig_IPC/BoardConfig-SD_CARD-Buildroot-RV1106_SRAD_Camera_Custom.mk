@@ -54,7 +54,11 @@ export RK_PARTITION_CMD_IN_ENV="32K(env),512K@32K(idblock),256K(uboot),32M(boot)
 #         /BBBB/CCCC ----> partition mount point
 #         ext4 ----------> partition filesystem type
 # "data" is omitted on purpose; S21uvrdata formats and mounts it.
-export RK_PARTITION_FS_TYPE_CFG=rootfs@IGNORE@ext4,oem@/oem@ext4
+# oem uses the IGNORE mountpoint so the stock mounter builds oem.img (ext4) but
+# never mounts it: its mount_part returns early for a non-root IGNORE partition,
+# skipping the rw mount + resize2fs grow that corrupts /oem on power loss.
+# S20oem mounts /oem read-only at its native size instead.
+export RK_PARTITION_FS_TYPE_CFG=rootfs@IGNORE@ext4,oem@IGNORE@ext4
 
 # config filesystem compress (Just for squashfs or ubifs)
 # squashfs: lz4/lzo/lzma/xz/gzip, default xz
@@ -130,6 +134,11 @@ export RK_PRE_BUILD_OEM_SCRIPT=luckfox-buildroot-oem-pre.sh
 
 # specify post.sh for delete/overlay files
 export RK_PRE_BUILD_USERDATA_SCRIPT=luckfox-userdata-pre.sh
+
+# Rootfs fixups run against the staged rootfs before it is packed. Bakes /data
+# in as a real mountpoint (the stock layout ships it as a /data -> userdata
+# symlink) so a read-only rootfs never has to collapse it at runtime.
+export RK_POST_BUILD_SCRIPT=luckfox-buildroot-post.sh
 
 # declare overlay directory
 export RK_POST_OVERLAY="overlay-luckfox-config overlay-luckfox-buildroot-init overlay-luckfox-buildroot-shadow"

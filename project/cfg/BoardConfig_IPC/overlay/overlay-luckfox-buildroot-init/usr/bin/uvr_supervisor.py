@@ -55,6 +55,7 @@ HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast per
 SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N IMU rows
 CSV_FLUSH_EVERY      = 100                           # flush CSV to disk every N rows
 RESTART_DELAY_S      = 2.0                           # pause before relaunch after error
+MAX_RECORD_ATTEMPTS  = 5                             # give up after this many failed tries
 PROGRESS_EVERY_S     = 5                             # in-recording progress log period
 # ---------------------------------------------------------------------------
 
@@ -97,6 +98,19 @@ def log(msg):
     # while stderr is still the init script's pipe.
     try:
         os.fsync(2)
+    except OSError:
+        pass
+
+
+def klog(msg):
+    """Mirror a milestone to /dev/kmsg so it lands on the serial console (and the
+    captured kernel log), independent of the per-run supervisor.log on /data.
+    The stop/finalize path unmounts /data and can be power-cut mid-way, taking
+    its own log dir with it; this keeps the trail visible regardless."""
+    try:
+        fd = os.open("/dev/kmsg", os.O_WRONLY)
+        os.write(fd, ("uvr: " + msg + "\n").encode("ascii", "replace"))
+        os.close(fd)
     except OSError:
         pass
 
@@ -222,6 +236,7 @@ class Supervisor:
         self.got_frame = threading.Event()
         self.last_frame = 0.0      # time.time() of the most recent imu frame
         self.graceful_stop = False # imu stream went quiet; finalize as a clean stop
+        self.launch_failed = False # vicap binary missing / couldn't exec: don't retry
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -384,7 +399,11 @@ class Supervisor:
             fsync_dir(run_dir)
             rc = self.wait_for(proc, video)
         except OSError as e:
+            # Binary missing or not executable (e.g. /oem failed to mount). This
+            # never fixes itself, so flag it as permanent: run() won't retry and
+            # spray a video.N/imu.N/vicap.N set per doomed attempt.
             log("failed to launch %s: %s" % (VICAP_BIN, e))
+            self.launch_failed = True
             rc = -1
         finally:
             if vicap_log_fd is not None:
@@ -429,6 +448,7 @@ class Supervisor:
             # drought check would fire instantly; skip it there.
             if not self.force_record and (time.time() - self.last_frame) > IMU_STOP_S:
                 log("imu stream stopped for %.0fs, finalizing recording" % IMU_STOP_S)
+                klog("drought: imu quiet %.0fs, starting graceful stop" % IMU_STOP_S)
                 self.graceful_stop = True
                 self.state = SOC_STOPPING
                 proc.terminate()   # SIGTERM: vicap flushes and closes the partial
@@ -505,8 +525,16 @@ class Supervisor:
                 log("recording finished cleanly")
                 break
             self.state = SOC_ERROR
+            if self.launch_failed:
+                # Permanent (missing/!exec binary): retrying just spews files.
+                log("vicap launch failed permanently, giving up")
+                break
             attempt += 1
-            log("state=ERROR, retrying in %.1fs (attempt %d)" % (RESTART_DELAY_S, attempt))
+            if attempt >= MAX_RECORD_ATTEMPTS:
+                log("giving up after %d failed attempts" % attempt)
+                break
+            log("state=ERROR, retrying in %.1fs (attempt %d/%d)"
+                % (RESTART_DELAY_S, attempt, MAX_RECORD_ATTEMPTS))
             time.sleep(RESTART_DELAY_S)
 
         # Stop the reader/kmsg/heartbeat threads so nothing else touches the
@@ -534,6 +562,8 @@ class Supervisor:
         if not done:
             # Gave up on a real error. Report it and let the stm32's heartbeat
             # timeout deal with power rather than unmounting/completing.
+            klog("finalize: NOT done (rc=%s graceful=%s) -> SOC_ERROR, no unmount"
+                 % (rc, self.graceful_stop))
             self.state = SOC_ERROR
             try:
                 os.write(fd, bytes([self.state]))
@@ -543,6 +573,7 @@ class Supervisor:
             return
 
         # Tell the stm32 we're finalizing, then leave /data cleanly unmounted.
+        klog("finalize: done, SOC_STOPPING, about to sync /data")
         self.state = SOC_STOPPING
         try:
             os.write(fd, bytes([self.state]))
@@ -550,6 +581,7 @@ class Supervisor:
             pass
         log("syncing and unmounting /data before power-off")
         os.sync()
+        klog("finalize: sync() returned, unmounting /data")
 
         # Our stdout/stderr (incl. the supervisor.log fd) live on /data and would
         # hold it busy, and so would our cwd if it's anywhere under /data. Move
@@ -568,9 +600,6 @@ class Supervisor:
             pass
 
         # Retry: right after reaping vicap the mount can briefly report EBUSY.
-        # The bare-sync fallback does NOT mark the fs clean, so a power cut after
-        # it leaves /data needing an fsck (a leaked block / bitmap diff) - only a
-        # real umount avoids that, so we try hard for one.
         umounted = False
         for attempt in range(5):
             rc = subprocess.call(["umount", DATA_DIR])
@@ -578,17 +607,37 @@ class Supervisor:
                 umounted = True
                 break
             log("umount /data failed (rc=%d), retry %d/5" % (rc, attempt + 1))
-            os.sync()
             time.sleep(0.5)
         if umounted:
             log("/data unmounted cleanly")
+            klog("finalize: /data unmounted cleanly")
         else:
-            log("could not unmount /data; synced only, fs will need fsck")
-            os.sync()
+            # Something still holds /data open (e.g. vicap wedged in the kernel).
+            # Do NOT leave it mounted rw and merely synced: the fs stays dirty,
+            # background writeback/jbd2 can re-touch metadata, and the imminent
+            # power cut then loses bitmap updates -> next-boot e2fsck fixes. A
+            # remount,ro succeeds even with files open: it flushes the journal and
+            # stops all further writes, so the cut lands on a quiesced fs.
+            rc = subprocess.call(["mount", "-o", "remount,ro", DATA_DIR])
+            if rc == 0:
+                log("could not unmount /data; remounted read-only instead")
+                klog("finalize: /data remounted read-only (umount busy)")
+            else:
+                log("could not unmount or remount-ro /data; syncing only")
+                klog("finalize: /data NOT quiesced, sync only (will need fsck)")
+                os.sync()
+
+        # umount/remount return once the block layer is flushed, but a card with
+        # a write-back cache may not have physically committed the final writes to
+        # NAND yet. Give it a full second to settle before we let the stm32 pull
+        # the rails, so the clean-unmount state actually survives the power cut.
+        os.sync()
+        time.sleep(1.0)
 
         # COMPLETE tells the stm32 to cut our power. Repeat it on the heartbeat
         # interval until it does, so a single dropped byte doesn't strand us
         # powered; the loop ends when the rails are pulled out from under us.
+        klog("finalize: sending SOC_COMPLETE until power is cut")
         self.state = SOC_COMPLETE
         while True:
             try:

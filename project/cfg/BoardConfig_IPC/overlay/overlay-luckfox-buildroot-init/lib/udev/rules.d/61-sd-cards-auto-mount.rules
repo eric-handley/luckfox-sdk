@@ -1,0 +1,13 @@
+# Auto-mount disabled on this board.
+#
+# This overwrites the stock rule of the same name. The stock version mounts
+# every ext4 SD partition (oem, rootfs, data) on /mnt/sdcard, rw, as each is
+# detected. That races our own mounters -- it grabs the oem partition so S20oem
+# fails "Device or resource busy", leaving librockit.so unavailable and vicap
+# unable to start -- and concurrently rw-mounting rootfs/data is a corruption
+# risk. This board owns its partitions explicitly (S20linkmount, S20oem,
+# S21uvrdata), so nothing here auto-mounts anything.
+#
+# NB: this eudev reads rules from /lib/udev/rules.d (and /run), NOT
+# /etc/udev/rules.d -- its sysconfdir is a build-time path that doesn't exist on
+# the device -- so the override must live here to take effect.

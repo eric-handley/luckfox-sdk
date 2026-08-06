@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# oem   Mount /oem read-only at its native size.
+#
+# /oem holds only the app libraries and kernel modules and is never written at
+# runtime, so it is mounted read-only and can never be corrupted by a power cut.
+# It is deliberately left out of the stock auto-mounter (RK_PARTITION_FS_TYPE_CFG
+# uses oem@IGNORE@ext4), which would otherwise mount it rw and grow it with
+# resize2fs on first boot -- a power cut during that write is what produced the
+# recurring "block bitmap and bg descriptor inconsistent" ext4 errors. Read-only
+# at native size means no writes to /oem, ever.
+#
+# Runs after S20linkmount, which creates /dev/block/by-name/oem.
+
+DEV=/dev/block/by-name/oem
+MNT=/oem
+
+# Also log to /dev/kmsg so failures survive on disk: /data isn't mounted yet, but
+# the supervisor captures the kernel log, so an "oem: ..." line ends up in the
+# pulled kernel.log. Without this, a mount failure is only visible on the serial
+# console (as happened when the udev auto-mounter grabbed the partition).
+klog() { echo "S20oem: $1" > /dev/kmsg 2>/dev/null; }
+
+case "$1" in
+    start)
+        [ -e "$DEV" ] || { klog "$DEV not found"; exit 1; }
+        if mountpoint -q "$MNT"; then
+            :
+        elif mount -t ext4 -o ro "$DEV" "$MNT"; then
+            klog "mounted $DEV read-only on $MNT"
+        else
+            klog "FAILED to mount $DEV on $MNT (librockit.so unavailable, vicap will not start)"
+            exit 1
+        fi
+        ;;
+    stop)
+        umount "$MNT" 2>/dev/null
+        ;;
+esac
