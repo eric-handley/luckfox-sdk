@@ -14,21 +14,36 @@ start() {
     [ -e "$DEV" ] || { echo "uvrdata: $DEV not found"; return 1; }
     mountpoint -q "$MNT" && return 0
 
-    # Format only a blank device or the old journal-less ext2; a journaled ext4
-    # is left alone. busybox blkid reports no TYPE, so check for the journal
-    # directly with dumpe2fs. mkfs.ext4 (never bare mke2fs, which makes ext2).
-    if ! dumpe2fs -h "$DEV" 2>/dev/null | grep -q has_journal; then
+    # busybox blkid reports no TYPE, so read the superblock directly with dumpe2fs
+    # and decide from its header what to do.
+    hdr=$(dumpe2fs -h "$DEV" 2>/dev/null)
+
+    if ! echo "$hdr" | grep -q has_journal; then
+        # Blank device or the old journal-less ext2: format fresh. mkfs.ext4 (never
+        # bare mke2fs, which makes ext2).
         echo "uvrdata: formatting $DEV as journaled ext4"
         # lazy_itable_init/lazy_journal_init=0: write all inode-table and journal
         # metadata now rather than from a background thread after mount, where a
         # power cut leaves bitmaps/checksums inconsistent. mkfs already fills the
         # whole growup partition, so no resize2fs is ever needed afterwards.
-        mkfs.ext4 -F -L data -E lazy_itable_init=0,lazy_journal_init=0 "$DEV" \
+        # ^metadata_csum: this board's kernel mishandles ext4 directory-leaf
+        # checksums (logs "No space for directory leaf checksum" then EBADMSGs
+        # every write to a full directory), so the feature is left off. Must match
+        # the host reflash format in the justfile.
+        mkfs.ext4 -F -L data -O ^metadata_csum -E lazy_itable_init=0,lazy_journal_init=0 "$DEV" \
             && tune2fs -c 0 -i 0 "$DEV"
+    elif echo "$hdr" | grep -Eq 'Filesystem state: +clean$' && ! echo "$hdr" | grep -q needs_recovery; then
+        # Cleanly unmounted last time: the graceful stop unmounts /data and idle
+        # remounts it read-only, both of which leave the fs marked clean with an
+        # empty journal. There is nothing to repair, so skip the check -- a forced
+        # e2fsck of the whole ~22GB card adds ~15s to every boot for no benefit.
+        echo "uvrdata: $DEV clean, skipping check"
     else
-        # -f forces a full check: after a power cut the kernel replays the journal
-        # and marks the superblock clean, so a plain e2fsck skips it and leaves
-        # latent bitmap/checksum corruption in place to abort on the first write.
+        # Not cleanly unmounted (a raw power cut mid-write). The kernel would replay
+        # the journal at mount and mark the fs clean, which hides any latent
+        # bitmap/checksum damage a plain e2fsck then skips -- so force a full check
+        # now, before mounting, to catch and fix it.
+        echo "uvrdata: $DEV not cleanly unmounted, running full e2fsck"
         e2fsck -fy "$DEV"
     fi
 

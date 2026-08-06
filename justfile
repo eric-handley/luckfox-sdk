@@ -37,22 +37,51 @@ flash device="/dev/mmcblk0":
     echo "Flash complete! Syncing..."
     sync
 
-    # Wipe /data too: sd_update.img only covers env..rootfs, so the growup data
-    # partition survives a plain reflash. No on-disk partition table exists
-    # (Rockchip uses the kernel blkdevparts= cmdline), so target it by byte
-    # offset from RK_PARTITION_CMD_IN_ENV:
+    # Reformat /data. sd_update.img only covers env..rootfs, so the growup data
+    # partition keeps its old (and, after power cuts, damaged) contents across a
+    # reflash. There is no on-disk partition table -- Rockchip defines partitions
+    # via the kernel blkdevparts= cmdline -- so we address partitions by their byte
+    # offsets from RK_PARTITION_CMD_IN_ENV:
     #   32K env +512K idblock +256K uboot +32M boot +512M oem +6G rootfs = data@
+    # data is the '-' growup partition, running from its offset to the end of the
+    # card, which is exactly what a loop device with -o OFFSET and no size limit
+    # covers. Format it here into a known-clean ext4 instead of leaving the board
+    # to detect damage and reformat itself on boot.
+    ROOTFS_OFFSET=571244544
     DATA_OFFSET=7013695488
-    magic=$(sudo dd if=/dev/mmcblk0 bs=1 skip=$((DATA_OFFSET + 1080)) count=2 2>/dev/null | xxd -p)
-    label=$(sudo dd if=/dev/mmcblk0 bs=1 skip=$((DATA_OFFSET + 1144)) count=16 2>/dev/null | tr -d '\0')
-    if [ "$magic" = "53ef" ] && [ "$label" = "data" ]; then
-        echo "Wiping /data (ext4 'data' @ $DATA_OFFSET)..."
-        sudo dd if=/dev/zero of=/dev/mmcblk0 bs=512 seek=$((DATA_OFFSET / 512)) count=32768 conv=fsync status=none
-        sync
-        echo "/data wiped (16 MiB zeroed: superblock, descriptors, journal)."
-    else
-        echo "No ext4 'data' fs at $DATA_OFFSET (magic=$magic label='$label'); skipping /data wipe."
+
+    # Safety: these offsets are only valid for the current partition layout. rootfs
+    # was just written fresh by the dd above, so its superblock is definitely valid;
+    # if the ext4 magic isn't where we expect it, the layout changed and every
+    # offset below (including data's) is wrong -- refuse rather than format blind.
+    rootfs_magic=$(sudo dd if=/dev/mmcblk0 bs=1 skip=$((ROOTFS_OFFSET + 1080)) count=2 2>/dev/null | xxd -p)
+    if [ "$rootfs_magic" != "53ef" ]; then
+        echo "ERROR: no ext4 superblock at expected rootfs offset $ROOTFS_OFFSET" \
+             "(magic=$rootfs_magic) -- partition layout changed, refusing to format" \
+             "/data at a now-unknown offset." >&2
+        exit 1
     fi
+
+    echo "Reformatting /data (ext4 @ $DATA_OFFSET)..."
+    LOOP=$(sudo losetup -f --show -o $DATA_OFFSET /dev/mmcblk0)
+    trap 'sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+    # Match S21uvrdata's on-device format so a host reflash and a from-blank board
+    # boot produce the same filesystem.
+    #   ^metadata_csum: this board's kernel mishandles ext4 directory-leaf checksums
+    #     (logs "No space for directory leaf checksum" then EBADMSGs every write to a
+    #     full directory), so the feature is off.
+    #   ^orphan_file: the host's e2fsprogs (1.47+) enables this by default, but the
+    #     board's mkfs/e2fsck are 1.46.5 and don't understand it -- leaving it on
+    #     makes the board's boot-time e2fsck bail ("unsupported feature FEATURE_C12")
+    #     so /data can never be checked after a power cut. Off = 1.46.5-compatible.
+    #   lazy_*_init=0: write all inode-table and journal metadata now rather than
+    #     from a post-mount background thread that a power cut could interrupt.
+    sudo mkfs.ext4 -F -L data -O ^metadata_csum,^orphan_file -E lazy_itable_init=0,lazy_journal_init=0 "$LOOP"
+    sudo tune2fs -c 0 -i 0 "$LOOP"
+    sudo losetup -d "$LOOP"
+    trap - EXIT
+    sync
+    echo "/data reformatted clean."
     echo "Done."
 
 picocom-logs:
