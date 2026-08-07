@@ -1870,7 +1870,24 @@ static bool dw_mci_reset(struct dw_mci *host)
 
 ciu_out:
 	/* After a CTRL reset we need to have CIU set clock registers  */
-	mci_send_cmd(host->slot, SDMMC_CMD_UPD_CLK, 0);
+	if (host->is_rv1106_sd) {
+		/*
+		 * RV1106 SD errata: UPD_CLK intermittently hangs after a CIU
+		 * reset (same failure the inline reset in dw_mci_request()
+		 * works around). mci_send_cmd() would busy-wait 500ms on that
+		 * hang; use the same 1ms poll instead -- if UPD_CLK does not
+		 * complete immediately it will not at all, and the next real
+		 * command works regardless.
+		 */
+		mci_writel(host, CMDARG, 0);
+		wmb(); /* drain writebuffer */
+		mci_writel(host, CMD, SDMMC_CMD_START | SDMMC_CMD_UPD_CLK);
+		readl_poll_timeout_atomic(host->regs + SDMMC_CMD, status,
+					  !(status & SDMMC_CMD_START),
+					  1, 1000);
+	} else {
+		mci_send_cmd(host->slot, SDMMC_CMD_UPD_CLK, 0);
+	}
 
 	return ret;
 }
