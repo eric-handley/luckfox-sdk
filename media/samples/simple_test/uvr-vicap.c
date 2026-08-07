@@ -23,6 +23,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include <rk_aiq_user_api2_sysctl.h>
 #include <rk_aiq_user_api2_ae.h>
@@ -88,6 +91,60 @@ static XCamReturn isp_err_cb(rk_aiq_err_msg_t *msg) {
     return XCAM_RETURN_NO_ERROR;
 }
 
+// rk_aiq_init_lib runs once per process (on the first enumStaticMetas) and reads
+// the ISP HW version. On a cold boot the rkisp media graph binds asynchronously;
+// if it isn't up yet the read returns 0 and is cached process-globally, so an
+// in-process retry can never recover -- only a fresh process can. So probe
+// readiness in throwaway children (each gets clean library state) and only run
+// the real init once a child confirms the sensor enumerates. Bounded, so the
+// supervisor's kill-and-relaunch stays the final backstop.
+static int wait_for_isp_ready(void) {
+    for (int attempt = 1; attempt <= ENUM_RETRIES; attempt++) {
+        if (g_quit)
+            return -1;
+        pid_t pid = fork();
+        if (pid < 0) {
+            printf("WARN: fork failed (%s); skipping readiness probe\n", strerror(errno));
+            return 0;  // can't probe -- let the real init try its luck
+        }
+        if (pid == 0) {
+            // child: mute the library's banner/error noise, just report status
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+            rk_aiq_static_info_t info;
+            memset(&info, 0, sizeof(info));
+            int ok = (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info) == 0 &&
+                      info.sensor_info.sensor_name[0] != '\0');
+            _exit(ok ? 0 : 1);
+        }
+        // bound the probe: a wedged child must not stall recording forever
+        int status = 0, waited_ms = 0;
+        pid_t r;
+        while ((r = waitpid(pid, &status, WNOHANG)) == 0 && waited_ms < 3000) {
+            usleep(50 * 1000);
+            waited_ms += 50;
+        }
+        if (r == 0) {  // still running past the cap -- kill, treat as not ready
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            printf("WARN: readiness probe %d/%d timed out, killed\n",
+                   attempt, ENUM_RETRIES);
+            usleep(ENUM_RETRY_MS * 1000);
+            continue;
+        }
+        if (r > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            if (attempt > 1)
+                printf("3A: ISP ready after %d probe(s)\n", attempt);
+            return 0;
+        }
+        printf("WARN: ISP not ready (probe %d/%d), retrying in %dms\n",
+               attempt, ENUM_RETRIES, ENUM_RETRY_MS);
+        usleep(ENUM_RETRY_MS * 1000);
+    }
+    printf("ERROR: ISP not ready after %d probes\n", ENUM_RETRIES);
+    return -1;
+}
+
 static int isp_start(void) {
     rk_aiq_static_info_t info;
     char hdr[16];
@@ -96,24 +153,15 @@ static int isp_start(void) {
     snprintf(hdr, sizeof(hdr), "%d", (int)g_aiq_mode);
     setenv("HDR_MODE", hdr, 1); // must be set before init
 
-    // An empty sensor_name means the sensor hasn't bound yet -> also a miss.
-    int enum_ok = 0;
-    for (int attempt = 1; attempt <= ENUM_RETRIES; attempt++) {
-        memset(&info, 0, sizeof(info));
-        if (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info) == 0 &&
-            info.sensor_info.sensor_name[0] != '\0') {
-            enum_ok = 1;
-            if (attempt > 1)
-                printf("3A: enumStaticMetas ok on attempt %d\n", attempt);
-            break;
-        }
-        printf("WARN: enumStaticMetas not ready (attempt %d/%d), retrying in %dms\n",
-               attempt, ENUM_RETRIES, ENUM_RETRY_MS);
-        usleep(ENUM_RETRY_MS * 1000);
-    }
-    if (!enum_ok) {
-        printf("ERROR: enumStaticMetas failed (no sensor after %d attempts)\n",
-               ENUM_RETRIES);
+    // Wait (via throwaway-child probes) until the ISP graph is up, so this
+    // process's one-shot rk_aiq_init_lib reads a valid HW version instead of
+    // caching a 0. Then the real enumStaticMetas below runs exactly once.
+    if (wait_for_isp_ready() != 0)
+        return -1;
+    memset(&info, 0, sizeof(info));
+    if (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info) != 0 ||
+        info.sensor_info.sensor_name[0] == '\0') {
+        printf("ERROR: enumStaticMetas failed after ISP ready\n");
         return -1;
     }
     printf("3A: cam %d sensor '%s' iq '%s'\n", CAM_ID,

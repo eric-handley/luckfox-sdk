@@ -158,17 +158,6 @@ copy-latest:
     just pull /data/latest/
     just mux
 
-# data-journal-info:
-#     DEV=/dev/mmcblk0
-#     OFF=7013695488
-#     LOOP=$(sudo losetup -f --show -r -o 7013695488 "$DEV")
-#     echo "loop=$LOOP"
-#     echo "=== superblock ==="
-#     sudo dumpe2fs -h "$LOOP" 2>/dev/null | grep -Ei 'Filesystem state|feature|Mount count|Last (mount|write)|Lifetime'
-#     echo "=== journal (empty == cleanly unmounted) ==="
-#     sudo debugfs -R "logdump -S" "$LOOP" 2>/dev/null | head -50
-#     sudo losetup -d "$LOOP"
-
 restart-rtsp board="172.32.0.1":
     #!/usr/bin/env bash
     set -euo pipefail
