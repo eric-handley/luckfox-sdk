@@ -274,8 +274,8 @@ static void mci_send_cmd(struct dw_mci_slot *slot, u32 cmd, u32 arg)
 				      !(cmd_status & SDMMC_CMD_START),
 				      1, 500 * USEC_PER_MSEC))
 		dev_err(&slot->mmc->class_dev,
-			"Timeout sending command (cmd %#x arg %#x status %#x)\n",
-			cmd, arg, cmd_status);
+			"Timeout sending command (cmd %#x arg %#x status %#x) caller=%pS\n",
+			cmd, arg, cmd_status, (void *)_RET_IP_);
 }
 
 static u32 dw_mci_prepare_command(struct mmc_host *mmc, struct mmc_command *cmd)

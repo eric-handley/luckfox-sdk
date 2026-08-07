@@ -447,8 +447,8 @@ static int card_busy_detect(struct mmc_card *card, unsigned int timeout_ms,
 		 */
 		if (done) {
 			dev_err(mmc_dev(card->host),
-				"Card stuck in wrong state! %s status: %#x\n",
-				 __func__, status);
+				"Card stuck in wrong state! %s status: %#x caller=%pS\n",
+				 __func__, status, (void *)_RET_IP_);
 			return -ETIMEDOUT;
 		}
 	} while (!mmc_ready_for_data(status));
@@ -1781,6 +1781,11 @@ static void mmc_blk_mq_rw_recovery(struct mmc_queue *mq, struct request *req)
 	 * bytes transferred to zero in that case.
 	 */
 	err = __mmc_send_status(card, &status, 0);
+	pr_err("MMCDBG %s: recovery dir=%s pos=%llu cmd_err=%d data_err=%d stop_err=%d status=%#x send_status_err=%d\n",
+	       req->rq_disk->disk_name,
+	       rq_data_dir(req) == READ ? "READ" : "WRITE",
+	       (unsigned long long)blk_rq_pos(req),
+	       brq->cmd.error, brq->data.error, brq->stop.error, status, err);
 	if (err || mmc_blk_status_error(req, status)) {
 		brq->data.bytes_xfered = 0;
 		if (mmc_card_sd(card) && !mmc_card_removed(card)) {

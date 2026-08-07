@@ -45,6 +45,13 @@
 #define VENC_GOP          60
 #define VENC_BITRATE_KB   (6 * 1024)        // n Mbps CBR
 #define IQ_FILE_DIR       "/etc/iqfiles"
+
+// The rkisp pipeline binds its subdevs asynchronously, so a cold-boot launch
+// can beat the sensor into the media graph and enumStaticMetas comes back empty.
+// Retry briefly (bounded ~3s); on exhaustion we return -1 as before, so the
+// supervisor relaunch still applies.
+#define ENUM_RETRIES      3
+#define ENUM_RETRY_MS     1000
 #define DEFAULT_OUT_PATH  "/data/uvr_capture.h265"
 
 enum log_level { LOG_QUIET = 0, LOG_NORMAL = 1, LOG_VERBOSE = 2 };
@@ -89,8 +96,24 @@ static int isp_start(void) {
     snprintf(hdr, sizeof(hdr), "%d", (int)g_aiq_mode);
     setenv("HDR_MODE", hdr, 1); // must be set before init
 
-    if (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info)) {
-        printf("ERROR: enumStaticMetas failed\n");
+    // An empty sensor_name means the sensor hasn't bound yet -> also a miss.
+    int enum_ok = 0;
+    for (int attempt = 1; attempt <= ENUM_RETRIES; attempt++) {
+        memset(&info, 0, sizeof(info));
+        if (rk_aiq_uapi2_sysctl_enumStaticMetas(CAM_ID, &info) == 0 &&
+            info.sensor_info.sensor_name[0] != '\0') {
+            enum_ok = 1;
+            if (attempt > 1)
+                printf("3A: enumStaticMetas ok on attempt %d\n", attempt);
+            break;
+        }
+        printf("WARN: enumStaticMetas not ready (attempt %d/%d), retrying in %dms\n",
+               attempt, ENUM_RETRIES, ENUM_RETRY_MS);
+        usleep(ENUM_RETRY_MS * 1000);
+    }
+    if (!enum_ok) {
+        printf("ERROR: enumStaticMetas failed (no sensor after %d attempts)\n",
+               ENUM_RETRIES);
         return -1;
     }
     printf("3A: cam %d sensor '%s' iq '%s'\n", CAM_ID,
