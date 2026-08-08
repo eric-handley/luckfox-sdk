@@ -56,6 +56,11 @@ SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N 
 CSV_FLUSH_EVERY      = 100                           # flush CSV to disk every N rows
 RESTART_DELAY_S      = 2.0                           # pause before relaunch after error
 MAX_RECORD_ATTEMPTS  = 5                             # give up after this many failed tries
+CSV_OPEN_ATTEMPTS    = 5                             # retries opening the imu csv before giving up
+CSV_OPEN_RETRY_S     = 0.5                           # pause between those csv-open retries
+CSV_REOPEN_MAX       = 5                             # times to reopen the csv after a write failure per run
+READER_MAX_RESTARTS  = 5                             # relaunches of a crashed imu reader before giving up
+READER_RESTART_DELAY_S = 0.5                         # pause before relaunching a crashed reader
 PROGRESS_EVERY_S     = 5                             # in-recording progress log period
 SETTLE_AFTER_UNMOUNT_S = 5.0                         # let the SD card commit its cache before power-off
 # ---------------------------------------------------------------------------
@@ -241,6 +246,24 @@ def open_output(path, preamble=b""):
         return None
 
 
+def open_output_retry(path, preamble=b""):
+    """open_output that retries a transient failure a few times before giving up.
+
+    A momentary open failure (the fs briefly busy/remounting) would otherwise
+    disable a sidecar file for the whole run; a bounded retry lets it recover.
+    Still returns None (never fatal) if every attempt fails.
+    """
+    for attempt in range(CSV_OPEN_ATTEMPTS):
+        fd = open_output(path, preamble)
+        if fd is not None:
+            return fd
+        if attempt < CSV_OPEN_ATTEMPTS - 1:
+            time.sleep(CSV_OPEN_RETRY_S)
+    log("gave up opening %s after %d attempts, continuing without it"
+        % (path, CSV_OPEN_ATTEMPTS))
+    return None
+
+
 class Supervisor:
     def __init__(self, force_record=False):
         self.force_record = force_record
@@ -248,6 +271,8 @@ class Supervisor:
         self.lock = threading.Lock()
         self.state = SOC_INIT
         self.csv = None            # open file while a recording is active
+        self.csv_path = None       # its path, so a failed write can reopen it
+        self.csv_reopen_left = 0   # remaining reopen attempts this recording
         self.klog = None           # ditto, for the kernel messages
         self.boot_log = b""        # ring buffer contents from before we started
         self.soc_temp = float("nan")
@@ -255,6 +280,7 @@ class Supervisor:
         self.temp_warned = False
         self.got_frame = threading.Event()
         self.last_frame = 0.0      # time.time() of the most recent imu frame
+        self.reader_up = False     # a reader is actively reading the imu uart
         self.graceful_stop = False # imu stream went quiet; finalize as a clean stop
         self.launch_failed = False # vicap binary missing / couldn't exec: don't retry
 
@@ -293,6 +319,23 @@ class Supervisor:
             return float("nan")
 
     # --- IMU reception -----------------------------------------------------
+    def reopen_csv(self):
+        """Reopen the imu csv (append, preserving rows already written) after a
+        write failure, so one transient error doesn't drop the csv for the whole
+        recording. Bounded by CSV_REOPEN_MAX so a persistently broken fs doesn't
+        turn every row into an open attempt. Caller holds self.lock."""
+        if self.csv_path is None or self.csv_reopen_left <= 0:
+            return None
+        self.csv_reopen_left -= 1
+        try:
+            fd = os.open(self.csv_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            log("reopened %s after write failure (%d reopen attempts left)"
+                % (self.csv_path, self.csv_reopen_left))
+            return fd
+        except OSError as e:
+            log("could not reopen %s (%s)" % (self.csv_path, e))
+            return None
+
     def on_imu(self, vals):
         with self.lock:
             fd = self.csv
@@ -311,11 +354,52 @@ class Supervisor:
                 if self.row_count % CSV_FLUSH_EVERY == 0:
                     os.fsync(fd)
             except OSError as e:
-                # Give up on the CSV rather than log this once per sample; the
-                # recording itself is the more important artefact.
-                log("csv write failed after %d rows (%s), abandoning csv"
+                # Try to recover by reopening (append) rather than dropping the
+                # csv for the rest of the run on one write error. Only once the
+                # bounded reopen attempts are spent do we give up; the recording
+                # itself is the more important artefact.
+                log("csv write failed after %d rows (%s), reopening"
                     % (self.row_count, e))
-                self.csv = None
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                self.csv = self.reopen_csv()
+                if self.csv is None:
+                    log("csv reopen exhausted, abandoning csv")
+
+    def reader_manager(self, fd):
+        """Keep an IMU reader alive for the whole run. reader_loop should only
+        return on shutdown; if it returns otherwise it hit an unexpected fault,
+        so reinitialize the uart and relaunch it (bounded) rather than leaving
+        the reader silently dead. While it is down the drought watchdog is held
+        off (see wait_for) so a reader crash never masquerades as the FC asking
+        us to stop and gets finalized as a clean recording."""
+        restarts = 0
+        while not self.stop.is_set():
+            self.reader_up = True
+            try:
+                self.reader_loop(fd)
+            except Exception:
+                log("imu reader crashed:\n%s" % traceback.format_exc())
+            self.reader_up = False
+            if self.stop.is_set():
+                break
+            restarts += 1
+            if restarts > READER_MAX_RESTARTS:
+                log("imu reader failed %d times, giving up on imu capture"
+                    % READER_MAX_RESTARTS)
+                return
+            log("imu reader down, reinitializing uart and restarting (%d/%d)"
+                % (restarts, READER_MAX_RESTARTS))
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except OSError as e:
+                log("uart flush during reader recovery failed: %s" % e)
+            self.stop.wait(READER_RESTART_DELAY_S)
+            # Give the drought watchdog a fresh baseline so the recovery gap
+            # itself isn't read as the imu stream going quiet.
+            self.last_frame = time.time()
 
     def reader_loop(self, fd):
         buf = bytearray()
@@ -410,10 +494,13 @@ class Supervisor:
 
         video = out("video.h265")
 
-        csv_fd = open_output(out("imu.csv"), (CSV_HEADER + "\n").encode("ascii"))
+        csv_path = out("imu.csv")
+        csv_fd = open_output_retry(csv_path, (CSV_HEADER + "\n").encode("ascii"))
         klog_fd = open_output(out("kernel.log"), self.boot_log)
         with self.lock:
             self.csv = csv_fd
+            self.csv_path = csv_path
+            self.csv_reopen_left = CSV_REOPEN_MAX
             self.klog = klog_fd
             self.row_count = 0
             self.soc_temp = self.read_soc_temp()
@@ -478,8 +565,11 @@ class Supervisor:
                     proc.kill()
                 return proc.poll()
             # In --record (manual ssh) mode there may be no stream at all, so the
-            # drought check would fire instantly; skip it there.
-            if not self.force_record and (time.time() - self.last_frame) > IMU_STOP_S:
+            # drought check would fire instantly; skip it there. Also hold it off
+            # while the reader is down/recovering: a dead reader stops frames too,
+            # but that is our fault, not the FC stopping, so it must not finalize.
+            if (not self.force_record and self.reader_up
+                    and (time.time() - self.last_frame) > IMU_STOP_S):
                 log("imu stream stopped for %.0fs, finalizing recording" % IMU_STOP_S)
                 klog("drought: imu quiet %.0fs, starting graceful stop" % IMU_STOP_S)
                 self.graceful_stop = True
@@ -614,7 +704,7 @@ class Supervisor:
         for handler in (signal.SIGTERM, signal.SIGINT):
             signal.signal(handler, lambda *_: self.stop.set())
 
-        threads = [(self.reader_loop, (fd,)), (self.heartbeat_loop, (fd,))]
+        threads = [(self.reader_manager, (fd,)), (self.heartbeat_loop, (fd,))]
 
         # /dev/kmsg starts at the oldest surviving record, so the first drain
         # gives us the boot log; the tail thread then continues from exactly

@@ -475,10 +475,19 @@ int main(int argc, char *argv[]) {
     RK_S32 count = 0;
     RK_U64 first_pts = 0, last_pts = 0;
     RK_U64 total_bytes = 0;
+    bool write_ok = true;
     while (!g_quit) {
         if (RK_MPI_VENC_GetStream(0, &frame, -1) == RK_SUCCESS) {
             void *data = RK_MPI_MB_Handle2VirAddr(frame.pstPack->pMbBlk);
-            fwrite(data, 1, frame.pstPack->u32Len, fp);
+            size_t len = frame.pstPack->u32Len;
+            size_t wrote = fwrite(data, 1, len, fp);
+            if (wrote != len) {
+                printf("ERROR: short write %zu/%zu bytes: %s\n", wrote, len,
+                       strerror(errno));
+                write_ok = false;
+                RK_MPI_VENC_ReleaseStream(0, &frame);
+                break;
+            }
 
             RK_U64 pts = frame.pstPack->u64PTS;
             if (count == 0) first_pts = pts;
@@ -517,7 +526,12 @@ int main(int argc, char *argv[]) {
                 break;
         }
     }
-    fflush(fp);
+    // Flush the buffered footage out to the SD card; if this fails the file on
+    // disk is short of what we wrote, so it is not a good recording.
+    if (fflush(fp) != 0) {
+        printf("ERROR: fflush failed: %s\n", strerror(errno));
+        write_ok = false;
+    }
 
     if (count > 1 && last_pts > first_pts) {
         double dur_s = (last_pts - first_pts) / 1e6;
@@ -529,7 +543,17 @@ int main(int argc, char *argv[]) {
     }
 
     free(frame.pstPack);
-    ret = 0;
+
+    // Succeed only if every frame was written intact AND we captured all the
+    // frames that were asked for (frame_cnt < 0 means "until stopped", so any
+    // clean stop counts). fclose is still checked below and can downgrade ret.
+    bool reached_target = (frame_cnt < 0) || (count >= frame_cnt);
+    if (write_ok && reached_target) {
+        ret = 0;
+    } else {
+        printf("ERROR: capture incomplete (write_ok=%d frames=%d/%d)\n",
+               write_ok, count, frame_cnt);
+    }
 
     RK_MPI_SYS_UnBind(&src, &dst);
 cleanup_venc:
@@ -543,8 +567,14 @@ cleanup_sys:
 cleanup_isp:
     isp_stop();
 cleanup_file:
-    if (fp)
-        fclose(fp);
+    if (fp && fclose(fp) != 0) {
+        // A close failure can be a deferred write error surfacing; the file is
+        // not safely finalized, so a run that was otherwise fine must not
+        // report success.
+        printf("ERROR: fclose failed: %s\n", strerror(errno));
+        if (ret == 0)
+            ret = -1;
+    }
     printf("UVR capture exit: %d (%s)\n", ret, raw_path ? raw_path : out_path);
     return ret;
 }
