@@ -63,6 +63,8 @@ READER_MAX_RESTARTS  = 5                             # relaunches of a crashed i
 READER_RESTART_DELAY_S = 0.5                         # pause before relaunching a crashed reader
 PROGRESS_EVERY_S     = 5                             # in-recording progress log period
 SETTLE_AFTER_UNMOUNT_S = 5.0                         # let the SD card commit its cache before power-off
+CMD_DEBOUNCE_N       = 3                             # consecutive identical frame commands before we act
+READER_STATS_EVERY_S = 5.0                           # period for the reader's reject/garbage summary
 # ---------------------------------------------------------------------------
 
 # Heartbeat state values, mirroring soc_status_t in the stm32 uart_format.h.
@@ -70,24 +72,28 @@ SOC_INIT      = 1
 SOC_RECORDING = 2
 SOC_STOPPED   = 3
 SOC_ERROR     = 4
-SOC_STOPPING  = 5   # imu stream stopped: saving the partial file and unmounting
+SOC_STOPPING  = 5   # stop requested: saving the partial file and unmounting
 SOC_COMPLETE  = 6   # the stm32 cuts our power on it; we repeat it until it does
+SOC_IDLE      = 7   # idle: /data read-only, parked; repeated so the stm32 sees it
 
-# IMU wire format: sync byte 0xAA, then a packed imu_data_t (accel[3], gyro[3],
-# temp), all little-endian floats.
+# Per-frame command tags, mirroring frame_cmd_t in the stm32 uart_format.h.
+FRAME_CMD_RECORD = 1
+FRAME_CMD_IDLE   = 2
+FRAME_CMD_STOP   = 3
+FRAME_CMDS       = frozenset((FRAME_CMD_RECORD, FRAME_CMD_IDLE, FRAME_CMD_STOP))
+CMD_NAMES        = {FRAME_CMD_RECORD: "RECORD", FRAME_CMD_IDLE: "IDLE",
+                    FRAME_CMD_STOP: "STOP", None: "none (default record)"}
+
+# IMU wire format: sync byte 0xAA, a command byte (frame_cmd_t), then a packed
+# imu_data_t (accel[3], gyro[3], temp), all little-endian floats.
 IMU_SOF   = b"\xaa"
 IMU_FMT   = "<7f"
 IMU_LEN   = struct.calcsize(IMU_FMT)
-FRAME_LEN = 1 + IMU_LEN
+FRAME_LEN = 2 + IMU_LEN
 
-# The presence of the IMU stream is the record signal: if the stm32 is streaming
-# frames we record, if none arrive in this window we are idle (booted only for
-# servicing, e.g. USB pull) and exit without touching the camera.
-IMU_WAIT_S = 3.0
-
-# Once recording, the stm32 streams a frame every loop, so a gap this long means
-# the stream stopped (FC requested a stop, or the link died): finalize and stop.
-IMU_STOP_S = 5.0
+# How long to wait at boot for the first debounced command before defaulting to
+# RECORD. A silent or garbled link therefore records rather than idling.
+COMMAND_WAIT_S = 3.0
 # How long to let vicap flush and exit after SIGTERM before we SIGKILL it. It
 # fflushes its write buffer and closes the file on the signal, so err generous to
 # keep the partial recording.
@@ -219,8 +225,11 @@ def move_stdio_to_kmsg():
         os.dup2(kfd, 1)
         os.dup2(kfd, 2)
         os.close(kfd)
-    except OSError:
-        pass
+    except OSError as e:
+        # Not fatal, but it means our stdio may still pin /data, so a following
+        # remount/unmount can fail EBUSY -- record it (klog, since stdio is the
+        # thing that just failed) rather than let it vanish.
+        klog("could not redirect stdio to kmsg (%s); /data may stay busy" % e)
 
 
 def close_fds(*fds):
@@ -278,25 +287,29 @@ class Supervisor:
         self.soc_temp = float("nan")
         self.row_count = 0
         self.temp_warned = False
-        self.got_frame = threading.Event()
-        self.last_frame = 0.0      # time.time() of the most recent imu frame
-        self.reader_up = False     # a reader is actively reading the imu uart
-        self.graceful_stop = False # imu stream went quiet; finalize as a clean stop
+        self.command = None        # latest debounced frame command (FRAME_CMD_*)
+        self.command_seen = threading.Event()  # set once the first command commits
+        self._pending_cmd = None   # command awaiting debounce confirmation
+        self._pending_count = 0    # consecutive frames carrying _pending_cmd
+        self.graceful_stop = False # got CMD_STOP: finalize as a clean stop
         self.launch_failed = False # vicap binary missing / couldn't exec: don't retry
 
     def set_state(self, state):
         with self.lock:
             self.state = state
 
-    def send_state(self, fd):
+    def send_state(self, fd, context=None):
         """Write the current state to the uart, snapshotting it under the same
-        lock as set_state() so a concurrent transition can't be torn."""
+        lock as set_state() so a concurrent transition can't be torn. A write
+        failure is silent for the repeated heartbeat, but the one-shot finalize
+        transitions pass a context so a lost hand-off to the stm32 is logged."""
         with self.lock:
             b = bytes([self.state])
         try:
             os.write(fd, b)
-        except OSError:
-            pass
+        except OSError as e:
+            if context is not None:
+                log("failed to send %s to stm32 (%s)" % (context, e))
 
     # --- sensors -----------------------------------------------------------
     def read_soc_temp(self):
@@ -368,21 +381,29 @@ class Supervisor:
                 if self.csv is None:
                     log("csv reopen exhausted, abandoning csv")
 
+    def observe_command(self, cmd):
+        """Debounce the per-frame command: only commit (and set command_seen)
+        after CMD_DEBOUNCE_N consecutive identical commands, so a single flipped
+        byte can't switch mode. Called from the reader thread only."""
+        if cmd == self._pending_cmd:
+            self._pending_count += 1
+        else:
+            self._pending_cmd = cmd
+            self._pending_count = 1
+        if self._pending_count >= CMD_DEBOUNCE_N and cmd != self.command:
+            self.command = cmd
+            self.command_seen.set()
+
     def reader_manager(self, fd):
-        """Keep an IMU reader alive for the whole run. reader_loop should only
-        return on shutdown; if it returns otherwise it hit an unexpected fault,
-        so reinitialize the uart and relaunch it (bounded) rather than leaving
-        the reader silently dead. While it is down the drought watchdog is held
-        off (see wait_for) so a reader crash never masquerades as the FC asking
-        us to stop and gets finalized as a clean recording."""
+        """Keep an IMU reader alive for the whole run. reader_loop only returns on
+        shutdown; if it returns otherwise it hit an unexpected fault, so flush the
+        uart and relaunch it (bounded) rather than leaving the reader dead."""
         restarts = 0
         while not self.stop.is_set():
-            self.reader_up = True
             try:
                 self.reader_loop(fd)
             except Exception:
                 log("imu reader crashed:\n%s" % traceback.format_exc())
-            self.reader_up = False
             if self.stop.is_set():
                 break
             restarts += 1
@@ -397,12 +418,13 @@ class Supervisor:
             except OSError as e:
                 log("uart flush during reader recovery failed: %s" % e)
             self.stop.wait(READER_RESTART_DELAY_S)
-            # Give the drought watchdog a fresh baseline so the recovery gap
-            # itself isn't read as the imu stream going quiet.
-            self.last_frame = time.time()
 
     def reader_loop(self, fd):
         buf = bytearray()
+        # Reception health, summarized periodically so sustained corruption or
+        # misalignment is visible instead of silently masquerading as "no data".
+        ok = rejected = garbage = 0
+        last_stats = time.time()
         while not self.stop.is_set():
             try:
                 data = os.read(fd, 512)
@@ -410,27 +432,37 @@ class Supervisor:
                 log("serial read failed: %s" % e)
                 self.stop.wait(0.1)
                 continue
-            if not data:
-                continue
-            buf.extend(data)
-            while True:
-                i = buf.find(IMU_SOF)
-                if i < 0:
-                    buf.clear()
-                    break
-                if i > 0:
-                    del buf[:i]
-                if len(buf) < FRAME_LEN:
-                    break
-                vals = struct.unpack(IMU_FMT, bytes(buf[1:FRAME_LEN]))
-                if not all(math.isfinite(v) for v in vals):
-                    # False sync byte inside float data: drop it and keep scanning.
-                    del buf[0]
-                    continue
-                self.got_frame.set()
-                self.last_frame = time.time()
-                del buf[:FRAME_LEN]
-                self.on_imu(vals)
+            if data:
+                buf.extend(data)
+                while True:
+                    i = buf.find(IMU_SOF)
+                    if i < 0:
+                        garbage += len(buf)   # no sync byte anywhere: all junk
+                        buf.clear()
+                        break
+                    if i > 0:
+                        garbage += i          # junk before the sync byte
+                        del buf[:i]
+                    if len(buf) < FRAME_LEN:
+                        break
+                    cmd = buf[1]
+                    vals = struct.unpack(IMU_FMT, bytes(buf[2:FRAME_LEN]))
+                    if cmd not in FRAME_CMDS or not all(math.isfinite(v) for v in vals):
+                        # False sync byte or corrupt frame: drop it and rescan.
+                        rejected += 1
+                        del buf[0]
+                        continue
+                    ok += 1
+                    self.observe_command(cmd)
+                    del buf[:FRAME_LEN]
+                    self.on_imu(vals)
+            now = time.time()
+            if now - last_stats >= READER_STATS_EVERY_S:
+                if rejected or garbage:
+                    log("imu reader: %d frames ok, %d rejected, %d garbage bytes "
+                        "in last %.0fs" % (ok, rejected, garbage, now - last_stats))
+                ok = rejected = garbage = 0
+                last_stats = now
 
     # --- kernel log --------------------------------------------------------
     def drain_kmsg(self, fd):
@@ -504,7 +536,6 @@ class Supervisor:
             self.klog = klog_fd
             self.row_count = 0
             self.soc_temp = self.read_soc_temp()
-        self.last_frame = time.time()   # so the drought watchdog has a baseline
         self.set_state(SOC_RECORDING)
 
         argv = [VICAP_BIN, "-o", video, "-l", str(VICAP_FRAMES), *VICAP_EXTRA_ARGS]
@@ -564,14 +595,12 @@ class Supervisor:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                 return proc.poll()
-            # In --record (manual ssh) mode there may be no stream at all, so the
-            # drought check would fire instantly; skip it there. Also hold it off
-            # while the reader is down/recovering: a dead reader stops frames too,
-            # but that is our fault, not the FC stopping, so it must not finalize.
-            if (not self.force_record and self.reader_up
-                    and (time.time() - self.last_frame) > IMU_STOP_S):
-                log("imu stream stopped for %.0fs, finalizing recording" % IMU_STOP_S)
-                klog("drought: imu quiet %.0fs, starting graceful stop" % IMU_STOP_S)
+            # Stop on an explicit, debounced CMD_STOP -- never on frame absence, so
+            # a reception gap or the encoder's slow cold-boot init can't be mistaken
+            # for the FC asking us to stop. --record mode ignores commands entirely.
+            if not self.force_record and self.command == FRAME_CMD_STOP:
+                log("received STOP command, finalizing recording")
+                klog("stop: got CMD_STOP, starting graceful stop")
                 self.graceful_stop = True
                 self.set_state(SOC_STOPPING)
                 proc.terminate()   # SIGTERM: vicap flushes and closes the partial
@@ -583,14 +612,13 @@ class Supervisor:
             time.sleep(0.2)
 
     # --- idle / finalize -----------------------------------------------------
-    def idle_shutdown(self):
-        # No stream: this boot is idle, powered up only to service the card
-        # (e.g. pull recordings over ssh). Remount /data read-only before we
-        # get out of the way: a read-only fs is never dirtied, so the stm32 can
-        # cut power at any moment -- planned or a surprise yank -- and the card
-        # stays clean, with no journal recovery or e2fsck on the next boot. The
-        # data is still fully readable over ssh.
-        log("no imu after %.0fs, idle (not recording)" % IMU_WAIT_S)
+    def run_idle(self):
+        # CMD_IDLE: this boot is idle, powered up only to service the card (e.g.
+        # pull recordings over ssh). Remount /data read-only: a read-only fs is
+        # never dirtied, so the stm32 can cut power at any moment -- planned or a
+        # surprise yank -- and the card stays clean, with no journal recovery or
+        # e2fsck on the next boot. The data is still fully readable over ssh.
+        log("IDLE command received, entering idle (not recording)")
 
         # Our stdout/stderr are the init script's >>/data/startup.log, which
         # holds /data open for writing and makes remount,ro fail EBUSY. Move
@@ -608,15 +636,23 @@ class Supervisor:
             log("could not remount /data read-only (rc=%d)" % rc)
             klog("idle: FAILED to remount /data read-only (rc=%d)" % rc)
 
+        # Stay alive so the heartbeat thread keeps emitting SOC_IDLE: that tells
+        # the stm32 to stop streaming and park us. Unlike a recording there is
+        # nothing to finalize; /data is read-only, so we just wait to be powered
+        # off (the stm32 cuts the rails on a later CMD_STOP).
+        self.set_state(SOC_IDLE)
+        while not self.stop.is_set():
+            self.stop.wait(HEARTBEAT_INTERVAL_S)
+
     def finalize(self, fd, rc):
         """Stop the reader/kmsg/heartbeat threads and drive the final state
         ourselves: unmount /data and hand off to the stm32 for power-off, or
         (force_record / a real failure) leave the port and fs as appropriate."""
         self.stop.set()
 
-        # A clean frame-limit finish (rc==0) and a graceful stop (imu stream went
-        # quiet, partial already saved by vicap on SIGTERM) both mean "recording
-        # is safely on disk, cut power". Anything else is a genuine failure.
+        # A clean frame-limit finish (rc==0) and a graceful stop (got CMD_STOP,
+        # partial already saved by vicap on SIGTERM) both mean "recording is
+        # safely on disk, cut power". Anything else is a genuine failure.
         done = (rc == 0) or self.graceful_stop
 
         if self.force_record:
@@ -625,7 +661,7 @@ class Supervisor:
                 log("syncing to disk")
                 os.sync()
             self.set_state(SOC_STOPPED)
-            self.send_state(fd)
+            self.send_state(fd, "SOC_STOPPED")
             os.close(fd)
             return
 
@@ -635,14 +671,14 @@ class Supervisor:
             klog("finalize: NOT done (rc=%s graceful=%s) -> SOC_ERROR, no unmount"
                  % (rc, self.graceful_stop))
             self.set_state(SOC_ERROR)
-            self.send_state(fd)
+            self.send_state(fd, "SOC_ERROR")
             os.close(fd)
             return
 
         # Tell the stm32 we're finalizing, then leave /data cleanly unmounted.
         klog("finalize: done, SOC_STOPPING, about to sync /data")
         self.set_state(SOC_STOPPING)
-        self.send_state(fd)
+        self.send_state(fd, "SOC_STOPPING")
         log("syncing and unmounting /data before power-off")
         os.sync()
         klog("finalize: sync() returned, unmounting /data")
@@ -721,12 +757,15 @@ class Supervisor:
             threading.Thread(target=run_guarded, args=(target, args), daemon=True).start()
 
         if self.force_record:
-            log("--record: forcing record, ignoring imu presence")
-        elif self.got_frame.wait(IMU_WAIT_S):
-            log("imu stream present, recording")
+            log("--record: forcing record, ignoring commands")
         else:
-            self.idle_shutdown()
-            return
+            # Act on the first debounced command; a silent/garbled link times out
+            # here and defaults to RECORD (fail toward capturing).
+            self.command_seen.wait(COMMAND_WAIT_S)
+            if self.command == FRAME_CMD_IDLE:
+                self.run_idle()
+                return
+            log("recording (command=%s)" % CMD_NAMES.get(self.command, self.command))
 
         # Only create a run directory once we know we are recording, so idle mode
         # leaves DATA_DIR/latest pointing at the last real recording.
