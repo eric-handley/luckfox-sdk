@@ -15,9 +15,11 @@ One run produces one directory, which DATA_DIR/latest points at:
     /data/1e37564f4f46_20210101T120247/
         supervisor.log      this file's output
         video.h265          the recording
+        audio.wav           mic capture (tinycap), started with the video
         imu.csv             one row per IMU frame
         kernel.log          boot log, then everything logged while recording
         vicap.log           uvr-vicap's stdout/stderr
+        audio.log           tinycap's stdout/stderr
 
 If a recording fails it is retried into the same directory, with the attempt
 number inserted into each name (video.1.h265, imu.1.csv, ...) so nothing from
@@ -50,6 +52,16 @@ VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
 VICAP_MINUTES        = 10
 VICAP_FRAMES         = VICAP_MINUTES * 60 * 30       # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]
+
+AUDIO_BIN            = "/usr/bin/tinycap"            # tinyalsa capture, WAV out
+AUDIO_CARD           = 0                             # ALSA card (rv1106-acodec)
+AUDIO_DEVICE         = 0                             # PCM device on that card
+AUDIO_CHANNELS       = 2                             # acodec capture DAI is stereo-only
+                                                     # (mic on right ADC); a 1ch open
+                                                     # is rejected EINVAL. Downmixed to
+                                                     # mono host-side in the mux (c1).
+AUDIO_RATE           = 48000                         # sample rate (Hz)
+AUDIO_BITS           = 16                            # sample width (bits)
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period
 SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N IMU rows
@@ -98,6 +110,12 @@ COMMAND_WAIT_S = 3.0
 # fflushes its write buffer and closes the file on the signal, so err generous to
 # keep the partial recording.
 VICAP_STOP_GRACE_S = 10.0
+# Cap tinycap's own run length a little past the video's frame budget, so the
+# video (frame-limited) or a CMD_STOP always ends the pair first; the -t is just
+# a backstop against a wedged stop leaving it recording forever.
+AUDIO_MAX_S        = VICAP_MINUTES * 60 + 30
+# Let tinycap flush and rewrite the WAV header after SIGINT before we SIGKILL it.
+AUDIO_STOP_GRACE_S = 5.0
 
 CSV_HEADER = ("timestamp,accel_x_g,accel_y_g,accel_z_g,"
               "gyro_x_dps,gyro_y_dps,gyro_z_dps,imu_temp_c,soc_temp_c")
@@ -519,12 +537,58 @@ class Supervisor:
                     log("heartbeat write failed: %s (suppressing until it recovers)" % e)
             self.stop.wait(HEARTBEAT_INTERVAL_S)
 
+    # --- audio ---------------------------------------------------------------
+    def start_audio(self, path):
+        """Best-effort mic capture (tinycap -> WAV), started alongside vicap so
+        the two begin together. Audio is subordinate to the video: a failure to
+        launch or record never fails the recording, mirroring the csv sidecar.
+        Returns (proc, log_fd), either of which may be None."""
+        log_fd = open_output(os.path.splitext(path)[0] + ".log")  # audio.wav -> audio.log
+        argv = [AUDIO_BIN, path,
+                "-D", str(AUDIO_CARD), "-d", str(AUDIO_DEVICE),
+                "-c", str(AUDIO_CHANNELS), "-r", str(AUDIO_RATE),
+                "-b", str(AUDIO_BITS), "-t", str(AUDIO_MAX_S)]
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,   # tinycap ignores stdin; keep it off the terminal
+                stdout=log_fd if log_fd is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT)
+            log("audio capture running as pid %d: %s" % (proc.pid, " ".join(argv)))
+            return proc, log_fd
+        except OSError as e:
+            log("failed to launch audio capture %s: %s (continuing without audio)"
+                % (AUDIO_BIN, e))
+            close_fds(log_fd)
+            return None, None
+
+    def stop_audio(self, proc, log_fd):
+        """Stop tinycap with SIGINT so it finalizes the WAV header (rewrites the
+        length), bounded by a grace before we SIGKILL. Always closes the log fd."""
+        if proc is not None:
+            try:
+                proc.send_signal(signal.SIGINT)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=AUDIO_STOP_GRACE_S)
+            except subprocess.TimeoutExpired:
+                log("audio capture did not stop in %.1fs, killing" % AUDIO_STOP_GRACE_S)
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            log("audio capture ended: rc=%s" % proc.poll())
+        close_fds(log_fd)
+
     # --- recording ----------------------------------------------------------
     def record(self, run_dir, attempt):
         def out(name):
             return os.path.join(run_dir, retry_name(name, attempt))
 
         video = out("video.h265")
+        audio = out("audio.wav")
 
         csv_path = out("imu.csv")
         csv_fd = open_output_retry(csv_path, (CSV_HEADER + "\n").encode("ascii"))
@@ -542,12 +606,16 @@ class Supervisor:
         log("starting capture: %s" % " ".join(argv))
 
         vicap_log_fd = open_output(out("vicap.log"))
+        audio_proc = audio_log_fd = None
         try:
             proc = subprocess.Popen(
                 argv,
                 stdout=vicap_log_fd if vicap_log_fd is not None else subprocess.DEVNULL,
                 stderr=subprocess.STDOUT)
             log("vicap running as pid %d" % proc.pid)
+            # Start the mic capture right after vicap so audio and video begin
+            # together. Best-effort: it never gates the recording.
+            audio_proc, audio_log_fd = self.start_audio(audio)
             # Persist all the run-dir entries (incl. video.h265, created by vicap)
             # so a power cut mid-recording keeps the partial files, not orphans.
             fsync_dir(run_dir)
@@ -560,6 +628,9 @@ class Supervisor:
             self.launch_failed = True
             rc = -1
         finally:
+            # Stop audio on every exit (frame-limit, CMD_STOP, shutdown, error)
+            # before we release the video log, so the WAV is finalized too.
+            self.stop_audio(audio_proc, audio_log_fd)
             close_fds(vicap_log_fd)
 
         with self.lock:
