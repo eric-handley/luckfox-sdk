@@ -100,7 +100,7 @@ pull filepath:
 
 # Mux a raw HEVC elementary stream into an mp4, folding in the matching audio
 # sidecar if present. The stream carries no timestamps or framerate, so force
-# 30fps on both input and output. The mic lands on the codec's LEFT ADC, so take
+# 60fps on both input and output. The mic lands on the codec's LEFT ADC, so take
 # the left channel (c0) explicitly -> mono AAC. Missing audio falls back to a
 # video-only mux so a recording is never lost.
 mux src="latest/video.h265" dst="latest/video.mp4":
@@ -134,23 +134,23 @@ mux src="latest/video.h265" dst="latest/video.mp4":
                 ss=$(awk "BEGIN{print -($off)/1000000}")        # audio earlier -> trim (s)
             fi
         fi
-        # Cap the output to the true video length (30fps is exact -> packets/30)
+        # Cap the output to the true video length (60fps is exact -> packets/60)
         # and apad-fill the audio tail. -shortest can't be used here: the copied
         # raw h265 carries no timestamps, so it reads as zero-length and cuts the
         # audio to nothing.
         vpkts=$(ffprobe -v error -select_streams v:0 -count_packets \
             -show_entries stream=nb_read_packets -of csv=p=0 "$src" 2>/dev/null || echo "")
         if [ -n "$vpkts" ]; then
-            ffmpeg -y -r 30 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
-                -af "pan=mono|c0=c0${pre},apad" -c:a aac -t "$(awk "BEGIN{print $vpkts/30}")" \
-                -r 30 -video_track_timescale 30000 "$dst"
+            ffmpeg -y -r 60 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
+                -af "pan=mono|c0=c0${pre},apad" -c:a aac -t "$(awk "BEGIN{print $vpkts/60}")" \
+                -r 60 -video_track_timescale 60000 "$dst"
         else
-            ffmpeg -y -r 30 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
+            ffmpeg -y -r 60 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
                 -af "pan=mono|c0=c0${pre}" -c:a aac \
-                -r 30 -video_track_timescale 30000 "$dst"
+                -r 60 -video_track_timescale 60000 "$dst"
         fi
     else
-        ffmpeg -y -r 30 -i "$src" -c copy -r 30 -video_track_timescale 30000 "$dst"
+        ffmpeg -y -r 60 -i "$src" -c copy -r 60 -video_track_timescale 60000 "$dst"
     fi
 
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy

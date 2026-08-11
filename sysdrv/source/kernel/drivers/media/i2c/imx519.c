@@ -6,7 +6,7 @@
  * Sony IMX519 register tables from the Arducam IMX519 driver
  * (Copyright (C) 2021 Arducam Technology co., Ltd.).
  *
- * Bring-up scope: single 4-lane SRGGB10 3072x1728 no-bin center-crop 30fps
+ * Bring-up scope: single 4-lane SRGGB10 3072x1728 no-bin center-crop 60fps
  * mode, no HDR, no autofocus.  The RV1106 ISP downscales this 1.6:1 to
  * 1920x1080 (supersample) for a sharper, properly anti-aliased 1080p output.
  */
@@ -50,9 +50,11 @@
 /* The sensor's internal pixel clock is fixed by the VT PLL registers and is
  * independent of the number of MIPI lanes.  This value matches the MTK
  * 4-lane reference driver (.pclk = 1388000000) whose VT PLL block we use,
- * and yields the 30fps readout with the mode's line_length (12800) and
- * frame_length (3614): 1388e6 / (12800 * 3614) = 30.0 fps.  Do NOT derive
- * it from link_freq. */
+ * and yields the 60fps readout with the mode's line_length (12800) and
+ * frame_length (1808): 1388e6 / (12800 * 1808) = 60.0 fps.  The 60fps is
+ * obtained purely by halving the frame_length (vertical blanking) from the
+ * 30fps 3614; the pixel clock, MIPI link rate and line_length are unchanged.
+ * Do NOT derive it from link_freq. */
 #define IMX519_PIXEL_RATE                   1388000000
 
 #define IMX519_XVCLK_FREQ_24M               24000000
@@ -513,8 +515,10 @@ static const struct regval imx519_mode_common_regs[] = {
  * use exactly 12800 clocks per line - shorter lines were verified on
  * hardware to cause column gain striping.
  *
- * With line_length 12800 (0x3200) and frame_length 3614 (0x0e1e) the readout
- * runs at 1388M / (12800 * 3614) = 30 fps.
+ * With line_length 12800 (0x3200) and frame_length 1808 (0x0710) the readout
+ * runs at 1388M / (12800 * 1808) = 60 fps.  frame_length (1808) stays above
+ * the 1728 active rows (80 lines of vertical blanking), so the readout still
+ * fits; only the max exposure (= vts - offset) shrinks accordingly.
  */
 static const struct regval imx519_linear_10bit_3072x1728_regs[] = {
     {0x0111, 0x02},
@@ -523,8 +527,8 @@ static const struct regval imx519_linear_10bit_3072x1728_regs[] = {
     {0x0114, 0x03},
     {0x0342, 0x32},
     {0x0343, 0x00},
-    {0x0340, 0x0e},
-    {0x0341, 0x1e},
+    {0x0340, 0x07},
+    {0x0341, 0x10},
     {0x0344, 0x03},
     {0x0345, 0x18},
     {0x0346, 0x03},
@@ -615,11 +619,11 @@ static const struct imx519_mode supported_modes[] = {
         .height = 1728,
         .max_fps = {
             .numerator = 10000,
-            .denominator = 300000,
+            .denominator = 600000,
         },
         .exp_def = IMX519_EXPOSURE_DEFAULT,
         .hts_def = 0x3200,
-        .vts_def = 0x0e1e,
+        .vts_def = 0x0710,
         .global_reg_list = imx519_mode_common_regs,
         .reg_list = imx519_linear_10bit_3072x1728_regs,
         .hdr_mode = NO_HDR,

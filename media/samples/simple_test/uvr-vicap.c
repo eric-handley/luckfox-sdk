@@ -45,8 +45,9 @@
 #define VI_HEIGHT         1080
 #define VI_BUF_COUNT      3
 #define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
-#define VENC_GOP          60
-#define VENC_BITRATE_KB   (6 * 1024)        // n Mbps CBR
+#define VIDEO_FPS         60                // sensor/ISP output cadence
+#define VENC_GOP          VIDEO_FPS         // 1s GOP
+#define VENC_BITRATE_KB   (8 * 1024)        // n Mbps CBR
 #define IQ_FILE_DIR       "/etc/iqfiles"
 
 // The rkisp pipeline binds its subdevs asynchronously, so a cold-boot launch
@@ -183,12 +184,12 @@ static int isp_start(void) {
     }
     printf("3A: rkaiq running\n");
 
-    // Let the IQ file's AecFrameRateMode (isFpsFix:1, FpsValue:30) drive the
+    // Let the IQ file's AecFrameRateMode (isFpsFix:1, FpsValue:60) drive the
     // cadence, exactly like rkaiq_3A_server does (no setExpSwAttr). The old
-    // in-process runtime fps override re-clamped output to 15fps even with a
-    // 30fps IQ, so it is disabled. Kept (commented) in case manual AE needs it:
+    // in-process runtime fps override re-clamped output below the IQ target,
+    // so it is disabled. Kept (commented) in case manual AE needs it:
     //     expSwAttr.stAuto.stFrmRate.isFpsFix = true;
-    //     expSwAttr.stAuto.stFrmRate.FpsValue = 30;
+    //     expSwAttr.stAuto.stFrmRate.FpsValue = 60;
     if (g_manual_ae) {
         Uapi_ExpSwAttrV2_t expSwAttr;
         memset(&expSwAttr, 0, sizeof(expSwAttr));
@@ -274,10 +275,11 @@ static int vi_chn_init(void) {
     }
 
     // OFFLINE mode: wrap DISABLED. The RV1106 ISP->VENC wrap/online (DVBM)
-    // path halves a genuine 30fps ISP stream to 15fps (the encoder receives
-    // 30fps but emits every other frame) - reproduced in Rockchip's own
-    // simple_vi_bind_venc_wrap sample. Offline (full frames via memory) comes
-    // up "online 0" and runs the full 30fps. Old wrap setup kept for ref:
+    // path halves the ISP frame rate (the encoder receives every frame but
+    // emits every other one, e.g. 60fps in -> 30fps out) - reproduced in
+    // Rockchip's own simple_vi_bind_venc_wrap sample. Offline (full frames via
+    // memory) comes up "online 0" and runs the full frame rate. Old wrap setup
+    // kept for ref:
     //   memset(&g_vi_wrap, 0, sizeof(g_vi_wrap));
     //   g_vi_wrap.bEnable = RK_TRUE;
     //   g_vi_wrap.u32BufLine = WRAP_LINE;
@@ -310,9 +312,9 @@ static int venc_init(void) {
     attr.stVencAttr.u32StreamBufCnt = 5;
     attr.stVencAttr.u32BufSize = VI_WIDTH * VI_HEIGHT * 3 / 2;
     attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
-    attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = 30;
+    attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = VIDEO_FPS;
     attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
-    attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = 30;
+    attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = VIDEO_FPS;
     attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
     attr.stRcAttr.stH265Cbr.u32BitRate = VENC_BITRATE_KB;
     attr.stRcAttr.stH265Cbr.u32Gop = VENC_GOP;
@@ -349,7 +351,7 @@ static int vi_dump_raw(const char *path, RK_S32 nframes) {
     RK_S32 got = 0;
     // Discard ~2s of frames so AF/AE converge before we keep one; the first
     // frames are always soft/mis-exposed and useless for judging detail.
-    RK_S32 warmup = 60;
+    RK_S32 warmup = 2 * VIDEO_FPS;
     while (!g_quit && warmup > 0) {
         if (RK_MPI_VI_GetChnFrame(0, CAM_ID, &vframe, 1000) != RK_SUCCESS)
             continue;
@@ -506,7 +508,7 @@ int main(int argc, char *argv[]) {
                 printf("frame %d seq:%d len:%u pts=%lld delay=%lldus\n", count,
                        frame.u32Seq, frame.pstPack->u32Len,
                        (long long)pts, (long long)(now_us() - pts));
-            } else if (g_log_level >= LOG_NORMAL && (count % 30 == 0)) {
+            } else if (g_log_level >= LOG_NORMAL && (count % VIDEO_FPS == 0)) {
                 printf("frame %d seq:%d delay=%lldus\n", count,
                        frame.u32Seq, (long long)(now_us() - pts));
             }

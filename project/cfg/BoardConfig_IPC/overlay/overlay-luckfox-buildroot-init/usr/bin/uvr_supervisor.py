@@ -50,7 +50,8 @@ KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
 VICAP_MINUTES        = 40
-VICAP_FRAMES         = VICAP_MINUTES * 60 * 30       # -l: frames per recording
+VIDEO_FPS            = 60                             # sensor/ISP output cadence
+VICAP_FRAMES         = VICAP_MINUTES * 60 * VIDEO_FPS # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]
 
 AUDIO_BIN            = "/usr/bin/tinycap"            # tinyalsa capture, WAV out
