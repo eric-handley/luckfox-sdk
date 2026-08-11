@@ -490,7 +490,15 @@ int main(int argc, char *argv[]) {
             }
 
             RK_U64 pts = frame.pstPack->u64PTS;
-            if (count == 0) first_pts = pts;
+            if (count == 0) {
+                first_pts = pts;
+                // A/V sync anchor: monotonic time of the first encoded frame
+                // written to the file. The audio sidecar logs the same token at
+                // its first sample; the host mux aligns the two by this stamp.
+                // Distinctive, single line, easy to grep.
+                printf("SYNC_START_US=%llu\n", (unsigned long long)now_us());
+                fflush(stdout);
+            }
             last_pts = pts;
             total_bytes += frame.pstPack->u32Len;
 

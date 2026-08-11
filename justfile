@@ -98,10 +98,60 @@ clean:
 pull filepath:
     scp -r root@172.32.0.1:{{filepath}} .
 
-# Mux a raw HEVC elementary stream into an mp4. The stream carries no timestamps
-# or framerate, so force 30fps on both input and output
+# Mux a raw HEVC elementary stream into an mp4, folding in the matching audio
+# sidecar if present. The stream carries no timestamps or framerate, so force
+# 30fps on both input and output. The mic lands on the codec's LEFT ADC, so take
+# the left channel (c0) explicitly -> mono AAC. Missing audio falls back to a
+# video-only mux so a recording is never lost.
 mux src="latest/video.h265" dst="latest/video.mp4":
-    ffmpeg -y -r 30 -i "{{src}}" -c copy -r 30 -video_track_timescale 30000 "{{dst}}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src="{{src}}"; dst="{{dst}}"
+    dir="${src%/*}"
+    base="${src##*/}"          # video.h265 or video.1.h265
+    mid="${base#video}"        # .h265 or .1.h265
+    tag="${mid%.h265}"         # "" or ".1"
+    audio="$dir/audio$tag.wav"
+    if [ -f "$audio" ]; then
+        # Align by the real capture-start stamps each stream logs (SYNC_START_US=
+        # <CLOCK_MONOTONIC us>): vicap at its first encoded frame, the supervisor
+        # at tinycap launch. Shift the audio so its start maps to the video start
+        # (adelay if it began later, -ss trim if earlier), pad the tail, and let
+        # -shortest cut the output to the video length. No fps/duration math.
+        vlog="$dir/vicap$tag.log"; alog="$dir/audio$tag.log"
+        vs=$(grep -oE 'SYNC_START_US=[0-9]+' "$vlog" 2>/dev/null | head -1 | cut -d= -f2)
+        as=$(grep -oE 'SYNC_START_US=[0-9]+' "$alog" 2>/dev/null | head -1 | cut -d= -f2)
+        # Fixed residual after stamp alignment (encoder pipeline latency on the
+        # video anchor + ALSA-open latency on the audio anchor). Positive delays
+        # the audio; raise if audio is still early, lower if it lags.
+        av_skew_ms=190
+        ss=0; pre=""
+        if [ -n "$vs" ] && [ -n "$as" ]; then
+            off=$((as - vs + av_skew_ms*1000))   # audio start vs video start, us
+            if [ "$off" -ge 0 ]; then
+                pre=",adelay=$(awk "BEGIN{print $off/1000}")"   # audio later -> delay (ms)
+            else
+                ss=$(awk "BEGIN{print -($off)/1000000}")        # audio earlier -> trim (s)
+            fi
+        fi
+        # Cap the output to the true video length (30fps is exact -> packets/30)
+        # and apad-fill the audio tail. -shortest can't be used here: the copied
+        # raw h265 carries no timestamps, so it reads as zero-length and cuts the
+        # audio to nothing.
+        vpkts=$(ffprobe -v error -select_streams v:0 -count_packets \
+            -show_entries stream=nb_read_packets -of csv=p=0 "$src" 2>/dev/null || echo "")
+        if [ -n "$vpkts" ]; then
+            ffmpeg -y -r 30 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
+                -af "pan=mono|c0=c0${pre},apad" -c:a aac -t "$(awk "BEGIN{print $vpkts/30}")" \
+                -r 30 -video_track_timescale 30000 "$dst"
+        else
+            ffmpeg -y -r 30 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
+                -af "pan=mono|c0=c0${pre}" -c:a aac \
+                -r 30 -video_track_timescale 30000 "$dst"
+        fi
+    else
+        ffmpeg -y -r 30 -i "$src" -c copy -r 30 -video_track_timescale 30000 "$dst"
+    fi
 
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy
 # matches the host. Drop caches before reading back so the checksum reflects

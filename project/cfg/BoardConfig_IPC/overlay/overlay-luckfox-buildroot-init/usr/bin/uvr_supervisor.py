@@ -56,12 +56,32 @@ VICAP_EXTRA_ARGS     = [""]
 AUDIO_BIN            = "/usr/bin/tinycap"            # tinyalsa capture, WAV out
 AUDIO_CARD           = 0                             # ALSA card (rv1106-acodec)
 AUDIO_DEVICE         = 0                             # PCM device on that card
-AUDIO_CHANNELS       = 2                             # acodec capture DAI is stereo-only
-                                                     # (mic on right ADC); a 1ch open
-                                                     # is rejected EINVAL. Downmixed to
-                                                     # mono host-side in the mux (c1).
+AUDIO_CHANNELS       = 2                             # acodec capture DAI is stereo-only;
+                                                     # a 1ch open is rejected EINVAL. The
+                                                     # mic lands on the LEFT ADC (ch0);
+                                                     # downmix mono host-side in the mux (c0).
 AUDIO_RATE           = 48000                         # sample rate (Hz)
 AUDIO_BITS           = 16                            # sample width (bits)
+
+AUDIO_MIXER_BIN      = "/usr/bin/tinymix"            # codec control (tinyalsa)
+# Codec front-end config applied before each capture. The right-channel gains +
+# MICBIAS on, at the codec's power-on default ADC Mode, are what put a working
+# mic on ch0/LEFT. Do NOT add an "ADC Mode" write here -- moving ADC Mode off the
+# boot default breaks the input and the mic no longer lands cleanly on ch0.
+# The mic is on ch0/LEFT, so the left-channel gains (previously left at boot
+# defaults) are the ones that actually amplify it; max them and turn on left AGC
+# for more level on quiet input.
+AUDIO_MIXER_SETTINGS = [
+    ("ADC MIC Right Gain",       "2"),
+    ("ADC ALC Right Volume",     "31"),
+    ("ADC Digital Right Volume", "255"),
+    ("ADC Main MICBIAS",         "1"),
+    ("ADC MIC Left Gain",        "2"),
+    ("ADC ALC Left Volume",      "31"),
+    ("ADC Digital Left Volume",  "204"),   # 80% of full-scale digital gain
+    ("AGC Left Approximate Sample Rate", "1"),   # 48 kHz, match the capture rate
+    ("ALC AGC Left Switch",      "1"),           # AGC on (left channel)
+]
 
 HEARTBEAT_INTERVAL_S = 0.2                           # UART0 state broadcast period
 SOC_TEMP_EVERY       = 10                            # refresh SoC temp every N IMU rows
@@ -538,11 +558,28 @@ class Supervisor:
             self.stop.wait(HEARTBEAT_INTERVAL_S)
 
     # --- audio ---------------------------------------------------------------
+    def configure_codec(self):
+        """Apply the codec front-end settings the mic needs (see
+        AUDIO_MIXER_SETTINGS). Best-effort: a failure here never blocks the
+        recording, same as the rest of the audio path."""
+        for name, value in AUDIO_MIXER_SETTINGS:
+            try:
+                rc = subprocess.call(
+                    [AUDIO_MIXER_BIN, "set", name, value],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if rc != 0:
+                    log("tinymix set %r=%s returned %d" % (name, value, rc))
+            except OSError as e:
+                log("failed to run tinymix (%s); skipping codec config" % e)
+                return
+
     def start_audio(self, path):
         """Best-effort mic capture (tinycap -> WAV), started alongside vicap so
         the two begin together. Audio is subordinate to the video: a failure to
         launch or record never fails the recording, mirroring the csv sidecar.
         Returns (proc, log_fd), either of which may be None."""
+        self.configure_codec()
         log_fd = open_output(os.path.splitext(path)[0] + ".log")  # audio.wav -> audio.log
         argv = [AUDIO_BIN, path,
                 "-D", str(AUDIO_CARD), "-d", str(AUDIO_DEVICE),
@@ -554,6 +591,17 @@ class Supervisor:
                 stdin=subprocess.DEVNULL,   # tinycap ignores stdin; keep it off the terminal
                 stdout=log_fd if log_fd is not None else subprocess.DEVNULL,
                 stderr=subprocess.STDOUT)
+            # A/V sync anchor: monotonic time tinycap was launched. Its first
+            # captured sample follows within the ALSA-open latency (~ms), unlike
+            # vicap whose frames start seconds after launch (camera init) -- so
+            # vicap stamps its first frame from inside, we stamp launch here.
+            # Same distinctive token in both logs; the host mux aligns by it.
+            if log_fd is not None:
+                try:
+                    us = int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000)
+                    os.write(log_fd, ("SYNC_START_US=%d\n" % us).encode("ascii"))
+                except OSError:
+                    pass
             log("audio capture running as pid %d: %s" % (proc.pid, " ".join(argv)))
             return proc, log_fd
         except OSError as e:
