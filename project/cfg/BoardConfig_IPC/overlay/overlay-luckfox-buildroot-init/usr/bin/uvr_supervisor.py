@@ -49,7 +49,7 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_MINUTES        = 10
+VICAP_MINUTES        = 40
 VICAP_FRAMES         = VICAP_MINUTES * 60 * 30       # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]
 
