@@ -49,7 +49,7 @@ SOC_TEMP_PATH        = "/sys/class/thermal/thermal_zone0/temp"  # millidegrees C
 KMSG_PATH            = "/dev/kmsg"                   # kernel ring buffer
 
 VICAP_BIN            = "/oem/usr/bin/uvr-vicap"
-VICAP_MINUTES        = 40
+VICAP_MINUTES        = 30
 VIDEO_FPS            = 60                             # sensor/ISP output cadence
 VICAP_FRAMES         = VICAP_MINUTES * 60 * VIDEO_FPS # -l: frames per recording
 VICAP_EXTRA_ARGS     = [""]

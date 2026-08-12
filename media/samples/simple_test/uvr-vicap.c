@@ -47,7 +47,7 @@
 #define WRAP_LINE         (VI_HEIGHT / 4)   // ISP->VENC wrap buffer height
 #define VIDEO_FPS         60                // sensor/ISP output cadence
 #define VENC_GOP          VIDEO_FPS         // 1s GOP
-#define VENC_BITRATE_KB   (8 * 1024)        // n Mbps CBR
+#define VENC_BITRATE_KB   (15 * 1024)       // n Mbps CBR
 #define IQ_FILE_DIR       "/etc/iqfiles"
 
 // The rkisp pipeline binds its subdevs asynchronously, so a cold-boot launch
