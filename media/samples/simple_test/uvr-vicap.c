@@ -431,6 +431,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, sigterm_handler);
 
     FILE *fp = NULL;
+    FILE *pts_fp = NULL;
     if (!raw_path) {
         fp = fopen(out_path, "wb");
         if (!fp) {
@@ -442,6 +443,28 @@ int main(int argc, char *argv[]) {
         // ~1.7s of footage rides in RAM, lost only on an unexpected power cut.
         static char io_buf[2 * 1024 * 1024];
         setvbuf(fp, io_buf, _IOFBF, sizeof(io_buf));
+
+        // Per-frame PTS sidecar: one decimal microsecond value per line, in the
+        // same order as the encoded frames written below. The raw HEVC carries no
+        // timestamps, so this is what lets the host mux rebuild the true (variable)
+        // frame timing instead of assuming a constant 60fps -- which matters when a
+        // degraded link drops frames mid-recording. Tiny + buffered, so negligible
+        // cost. Best-effort: a sidecar failure never fails the recording.
+        // video.h265 -> video.pts (a custom -o path -> <out_path>.pts).
+        char pts_path[600];
+        size_t olen = strlen(out_path);
+        if (olen > 5 && strcmp(out_path + olen - 5, ".h265") == 0)
+            snprintf(pts_path, sizeof(pts_path), "%.*s.pts", (int)(olen - 5), out_path);
+        else
+            snprintf(pts_path, sizeof(pts_path), "%s.pts", out_path);
+        pts_fp = fopen(pts_path, "wb");
+        if (pts_fp) {
+            static char pts_buf[64 * 1024];
+            setvbuf(pts_fp, pts_buf, _IOFBF, sizeof(pts_buf));
+        } else {
+            printf("WARN: cannot open PTS sidecar %s: %s (continuing)\n",
+                   pts_path, strerror(errno));
+        }
     }
 
     if (isp_start() != 0)
@@ -492,6 +515,10 @@ int main(int argc, char *argv[]) {
             }
 
             RK_U64 pts = frame.pstPack->u64PTS;
+            // Record this frame's PTS in the sidecar (best-effort), one per
+            // encoded frame so the host can reconstruct the real frame timing.
+            if (pts_fp)
+                fprintf(pts_fp, "%llu\n", (unsigned long long)pts);
             if (count == 0) {
                 first_pts = pts;
                 // A/V sync anchor: monotonic time of the first encoded frame
@@ -542,6 +569,10 @@ int main(int argc, char *argv[]) {
         printf("ERROR: fflush failed: %s\n", strerror(errno));
         write_ok = false;
     }
+    // Push the PTS sidecar out in step with the video (best-effort; a sidecar
+    // problem is not a reason to fail an otherwise good recording).
+    if (pts_fp && fflush(pts_fp) != 0)
+        printf("WARN: PTS sidecar flush failed: %s\n", strerror(errno));
 
     if (count > 1 && last_pts > first_pts) {
         double dur_s = (last_pts - first_pts) / 1e6;
@@ -585,6 +616,8 @@ cleanup_file:
         if (ret == 0)
             ret = -1;
     }
+    if (pts_fp && fclose(pts_fp) != 0)
+        printf("WARN: PTS sidecar close failed: %s\n", strerror(errno));
     printf("UVR capture exit: %d (%s)\n", ret, raw_path ? raw_path : out_path);
     return ret;
 }
