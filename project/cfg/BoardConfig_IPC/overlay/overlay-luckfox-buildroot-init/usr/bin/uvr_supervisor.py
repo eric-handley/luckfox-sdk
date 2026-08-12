@@ -765,11 +765,10 @@ class Supervisor:
             self.stop.wait(HEARTBEAT_INTERVAL_S)
 
     def finalize(self, fd, rc):
-        """Stop the reader/kmsg/heartbeat threads and drive the final state
-        ourselves: unmount /data and hand off to the stm32 for power-off, or
-        (force_record / a real failure) leave the port and fs as appropriate."""
-        self.stop.set()
-
+        """Drive the final state ourselves. A clean finish or graceful stop syncs
+        and unmounts /data, then hands off to the stm32 for power-off. A total
+        failure keeps reporting SOC_ERROR until the stm32 sends a STOP, then takes
+        that same power-off path. force_record stays powered with /data mounted."""
         # A clean frame-limit finish (rc==0) and a graceful stop (got CMD_STOP,
         # partial already saved by vicap on SIGTERM) both mean "recording is
         # safely on disk, cut power". Anything else is a genuine failure.
@@ -777,6 +776,7 @@ class Supervisor:
 
         if self.force_record:
             # Stay powered so an ssh session survives; leave /data mounted.
+            self.stop.set()
             if done:
                 log("syncing to disk")
                 os.sync()
@@ -786,14 +786,25 @@ class Supervisor:
             return
 
         if not done:
-            # Gave up on a real error. Report it and let the stm32's heartbeat
-            # timeout deal with power rather than unmounting/completing.
-            klog("finalize: NOT done (rc=%s graceful=%s) -> SOC_ERROR, no unmount"
+            # Gave up on a real error. Don't exit -- that kills the heartbeat and
+            # leaves the stm32 with no state to act on, so it can never cut our
+            # power and the SoC sits there stuck on. Instead keep reporting
+            # SOC_ERROR and stay alive until the stm32 sends a STOP (its power-off
+            # signal); only then do we fall through to the normal power-off. Leave
+            # the reader/heartbeat threads running so we can see that STOP and keep
+            # advertising the error, so don't stop them yet.
+            klog("finalize: NOT done (rc=%s graceful=%s) -> SOC_ERROR, awaiting STOP"
                  % (rc, self.graceful_stop))
             self.set_state(SOC_ERROR)
-            self.send_state(fd, "SOC_ERROR")
-            os.close(fd)
-            return
+            log("all recording attempts failed; reporting SOC_ERROR, waiting for "
+                "STOP command before power-off")
+            while not self.stop.is_set() and self.command != FRAME_CMD_STOP:
+                self.stop.wait(0.2)
+            klog("finalize: STOP received (or shutdown), proceeding to power off")
+
+        # Stop the helper threads and drive the final handoff ourselves. Reached
+        # by a clean finish, a graceful stop, or a total failure now told to stop.
+        self.stop.set()
 
         # Tell the stm32 we're finalizing, then leave /data cleanly unmounted.
         klog("finalize: done, SOC_STOPPING, about to sync /data")

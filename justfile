@@ -112,6 +112,9 @@ mux src="latest/video.h265" dst="latest/video.mp4":
     mid="${base#video}"        # .h265 or .1.h265
     tag="${mid%.h265}"         # "" or ".1"
     audio="$dir/audio$tag.wav"
+    # Video-only mux, used both when no audio sidecar exists and as a fallback
+    # when the audio is present but unusable (corrupt/short wav -> ffmpeg errors).
+    video_only() { ffmpeg -y -r 60 -i "$src" -c copy -r 60 -video_track_timescale 60000 "$dst"; }
     if [ -f "$audio" ]; then
         # Align by the real capture-start stamps each stream logs (SYNC_START_US=
         # <CLOCK_MONOTONIC us>): vicap at its first encoded frame, the supervisor
@@ -143,14 +146,14 @@ mux src="latest/video.h265" dst="latest/video.mp4":
         if [ -n "$vpkts" ]; then
             ffmpeg -y -r 60 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
                 -af "pan=mono|c0=c0${pre},apad" -c:a aac -t "$(awk "BEGIN{print $vpkts/60}")" \
-                -r 60 -video_track_timescale 60000 "$dst"
+                -r 60 -video_track_timescale 60000 "$dst" || video_only
         else
             ffmpeg -y -r 60 -i "$src" -ss "$ss" -i "$audio" -c:v copy \
                 -af "pan=mono|c0=c0${pre}" -c:a aac \
-                -r 60 -video_track_timescale 60000 "$dst"
+                -r 60 -video_track_timescale 60000 "$dst" || video_only
         fi
     else
-        ffmpeg -y -r 60 -i "$src" -c copy -r 60 -video_track_timescale 60000 "$dst"
+        video_only
     fi
 
 # Copy a file to the board, flush it to the SD card and verify the on-disk copy
