@@ -326,6 +326,13 @@ struct rockchip_thermal_data {
 /* -40 to 125 is reliable, outside the range existed unreliability */
 #define MIN_TEMP				(-60000)
 #define MAX_TEMP				(180000)
+/*
+ * The sensor is only reliable up to 125C; codes above that saturate into
+ * the 125-180C bucket of the conversion table. Treat any reading beyond
+ * this ceiling as a bad conversion rather than a real temperature, so a
+ * spurious value can't trigger a false shutdown.
+ */
+#define SANE_MAX_TEMP				(130000)
 
 /**
  * struct tsadc_table - code to temperature conversion table
@@ -843,7 +850,7 @@ static int rk_tsadcv2_code_to_temp(const struct chip_tsadc_table *table,
 
 	if (table->kNum) {
 		*temp = (((int)code - table->bNum) * 10000 / table->kNum) * 100;
-		if (*temp < MIN_TEMP || *temp > MAX_TEMP)
+		if (*temp < MIN_TEMP || *temp > SANE_MAX_TEMP)
 			return -EAGAIN;
 		return 0;
 	}
@@ -900,6 +907,17 @@ static int rk_tsadcv2_code_to_temp(const struct chip_tsadc_table *table,
 	num *= abs(table->id[mid - 1].code - code);
 	denom = abs(table->id[mid - 1].code - table->id[mid].code);
 	*temp = table->id[mid - 1].temp + (num / denom);
+
+	/*
+	 * Codes above the reliable range saturate into the 125-180C bucket.
+	 * Reject those as bad conversions so a spurious high reading can't
+	 * trip a critical shutdown; the poll simply retries next cycle.
+	 */
+	if (*temp > SANE_MAX_TEMP) {
+		pr_warn_ratelimited("%s: implausible reading %dmC (code %u), ignoring\n",
+				    __func__, *temp, code);
+		return -EAGAIN;
+	}
 
 	return 0;
 }
