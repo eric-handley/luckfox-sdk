@@ -229,7 +229,7 @@ def fsync_dir(path):
 
 def make_run_dir():
     """Create this run's output directory and point DATA_DIR/latest at it."""
-    name = "%s_%s" % (uuid.uuid4().hex[:12], datetime.now().strftime("%Y%m%dT%H%M%S"))
+    name = uuid.uuid4().hex[:12]
     path = os.path.join(DATA_DIR, name)
     os.makedirs(path, exist_ok=True)
     fsync_dir(DATA_DIR)
