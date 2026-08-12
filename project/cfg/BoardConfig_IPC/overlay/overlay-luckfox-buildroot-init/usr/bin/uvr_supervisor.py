@@ -98,6 +98,20 @@ PROGRESS_EVERY_S     = 5                             # in-recording progress log
 SETTLE_AFTER_UNMOUNT_S = 5.0                         # let the SD card commit its cache before power-off
 CMD_DEBOUNCE_N       = 3                             # consecutive identical frame commands before we act
 READER_STATS_EVERY_S = 5.0                           # period for the reader's reject/garbage summary
+
+KERN_PRINTK_PATH     = "/proc/sys/kernel/printk"     # kernel console log-level control
+KERN_CONSOLE_LOGLEVEL = 3                            # keep emerg/alert/crit on console, drop err/warn/info
+KLOG_LEVEL           = KERN_CONSOLE_LOGLEVEL - 1     # priority for our klog() lines: below the console
+                                                     #   threshold so they still print on the serial tty
+                                                     #   after we lower it (else our own milestones vanish
+                                                     #   along with the err/warn spam we're muting)
+KLOG_WINDOW_S        = 1.0                           # rate-limit window for kmsg -> kernel.log writes
+KLOG_HOT_PER_WINDOW  = 50                            # records/window that marks a window "hot" (steady-state
+                                                     #   recording is <=17/s; camera-init blips to ~80/s)
+KLOG_OVERRUN_HOT     = 2                             # ...or this many ring-buffer overruns/window (we're
+                                                     #   losing records = flooding faster than we can read)
+KLOG_HOT_SUSTAIN     = 3                             # consecutive hot windows before we start dropping, so a
+                                                     #   brief camera-init burst never trips it, only a storm
 # ---------------------------------------------------------------------------
 
 # Heartbeat state values, mirroring soc_status_t in the stm32 uart_format.h.
@@ -157,13 +171,40 @@ def klog(msg):
     """Mirror a milestone to /dev/kmsg so it lands on the serial console (and the
     captured kernel log), independent of the per-run supervisor.log on /data.
     The stop/finalize path unmounts /data and can be power-cut mid-way, taking
-    its own log dir with it; this keeps the trail visible regardless."""
+    its own log dir with it; this keeps the trail visible regardless.
+
+    Tagged <KLOG_LEVEL> (below KERN_CONSOLE_LOGLEVEL) so it still prints to the
+    serial console after quiet_kernel_console() lowers the threshold -- otherwise
+    our own milestones would get filtered out with the err/warn spam we mute."""
     try:
         fd = os.open("/dev/kmsg", os.O_WRONLY)
-        os.write(fd, ("uvr: " + msg + "\n").encode("ascii", "replace"))
+        os.write(fd, ("<%d>uvr: %s\n" % (KLOG_LEVEL, msg)).encode("ascii", "replace"))
         os.close(fd)
     except OSError:
         pass
+
+
+def quiet_kernel_console(level=KERN_CONSOLE_LOGLEVEL):
+    """Lower the kernel console log level so a flood of low-priority kernel
+    messages can't stall the CPU. A marginal camera link throws thousands of
+    KERN_ERR mipi/csi errors per second; each one is printed synchronously to the
+    115200 serial console (console=ttyS2), which burns the single core and starves
+    our reader so a STOP never gets serviced. Dropping err/warn/info from the
+    console spares that cost. The messages still reach the ring buffer, so
+    /dev/kmsg and kernel.log keep capturing them"""
+    try:
+        fd = os.open(KERN_PRINTK_PATH, os.O_WRONLY)
+        try:
+            os.write(fd, ("%d\n" % level).encode("ascii"))
+        finally:
+            os.close(fd)
+        log("kernel console loglevel set to %d" % level)
+        # Echo it on the serial console too, so a live session can confirm the
+        # mitigation is armed before reproducing the fault.
+        klog("kernel console loglevel set to %d (err/warn/info muted on console)"
+             % level)
+    except OSError as e:
+        log("could not set kernel console loglevel (%s)" % e)
 
 
 def _read_first(path):
@@ -517,7 +558,33 @@ class Supervisor:
                     log("kmsg backlog read failed: %s" % e)
                     return bytes(out)
 
+    def _klog_write(self, data):
+        """Append raw bytes to the run's kernel.log, dropping it on write error."""
+        with self.lock:
+            if self.klog is not None:
+                try:
+                    os.write(self.klog, data)
+                except OSError as e:
+                    log("klog write failed (%s), abandoning kernel log" % e)
+                    self.klog = None
+
     def kmsg_loop(self, fd):
+        # Normally we mirror every kernel record into kernel.log. But a degraded
+        # camera link can flood the ring buffer far faster than we can drain it
+        # (thousands/sec), which burns CPU + SD IO, balloons the file, and shows
+        # up as EPIPE overruns as records get overwritten before we read them.
+        # quiet_kernel_console() spares the big cost (those going to the serial
+        # console); this spares our own. When a window is "hot" -- either the
+        # record rate crosses KLOG_HOT_PER_WINDOW or we take KLOG_OVERRUN_HOT+
+        # overruns (real rate is masked by the loss) -- for KLOG_HOT_SUSTAIN
+        # windows running, we stop writing records and emit one summary per window
+        # instead. The sustain requirement means only a real storm trips it; the
+        # brief camera-init burst (~80/s for 1-2s) rides through untouched. A few
+        # lost ISP records don't matter -- the detail is in vicap.log.
+        win_start = time.time()
+        seen = dropped = overruns = 0
+        hot_streak = 0
+        engaged = False
         while not self.stop.is_set():
             try:
                 rec = os.read(fd, 8192)
@@ -526,19 +593,44 @@ class Supervisor:
                     self.stop.wait(0.1)
                 elif e.errno == errno.EPIPE:
                     # We fell behind and records were overwritten; the kernel has
-                    # already moved us to the next available one.
-                    log("kernel log overrun, some messages were lost")
+                    # moved us to the next available one. Counted per window (a
+                    # storm signal in its own right), not logged per event.
+                    overruns += 1
                 else:
                     log("kmsg read failed: %s" % e)
                     self.stop.wait(0.1)
-                continue
-            with self.lock:
-                if self.klog is not None:
-                    try:
-                        os.write(self.klog, rec)
-                    except OSError as e:
-                        log("klog write failed (%s), abandoning kernel log" % e)
-                        self.klog = None
+                # Fall through so the window still rolls over even under an EPIPE
+                # storm (where os.read never returns a record).
+                rec = None
+            else:
+                seen += 1
+                if engaged:
+                    dropped += 1
+                else:
+                    self._klog_write(rec)
+
+            now = time.time()
+            if now - win_start >= KLOG_WINDOW_S:
+                span = now - win_start
+                hot = seen >= KLOG_HOT_PER_WINDOW or overruns >= KLOG_OVERRUN_HOT
+                hot_streak = hot_streak + 1 if hot else 0
+                was = engaged
+                engaged = hot_streak >= KLOG_HOT_SUSTAIN
+                if engaged:
+                    msg = ("kernel log flooding: %d records/%.0fs (dropped %d, "
+                           "%d overruns)" % (seen, span, dropped, overruns))
+                    self._klog_write(("uvr: " + msg + "\n").encode("ascii", "replace"))
+                    log(msg)
+                    klog(msg)          # to the serial console, for live verification
+                elif was:
+                    log("kernel log flood subsided")
+                    klog("kernel log flood subsided")
+                elif overruns:
+                    # Not (yet) a sustained storm, but we still lost records --
+                    # note it once for the window rather than per event.
+                    log("kernel log overrun, %d records lost" % overruns)
+                win_start = now
+                seen = dropped = overruns = 0
         os.close(fd)
 
     # --- heartbeat ---------------------------------------------------------
@@ -866,6 +958,10 @@ class Supervisor:
     # --- main --------------------------------------------------------------
     def run(self):
         log("supervisor starting (port=%s)" % SERIAL_PORT)
+        # Spare the CPU from a synchronous serial-console printk storm if the
+        # camera link degrades mid-run; the ring buffer (and our kernel.log) still
+        # get everything. Done first so it protects the whole session.
+        quiet_kernel_console()
         fd = open_serial(SERIAL_PORT)
 
         for handler in (signal.SIGTERM, signal.SIGINT):
